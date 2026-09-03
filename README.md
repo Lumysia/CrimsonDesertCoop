@@ -4,7 +4,7 @@ A co-op multiplayer mod for [Crimson Desert](https://store.steampowered.com/app/
 
 > **Status: 0.3.1 Pre-Alpha - Safe Player-Sync Baseline**
 >
-> Steam connection polling, handshake retry, symmetric companion hijacking, position interpolation, and health state handling form the current testable MVP on a supported game build. The July 2026 game update invalidated the published core signatures; until fresh offsets are verified, the mod detects that build and refuses to start a co-op session instead of risking a save-load crash. Enemy/combat sync and direct animation writes are disabled because their previous hook ABI/entity mapping was unsafe. DX12 overlay rendering is experimental and off by default; the Present hook remains tick-only.
+> Steam connection polling, handshake retry, position interpolation, and health state handling form the current testable baseline. Steam build `25050808` has verified WorldSystem, local-player, TransformSync position/rotation, and health reads. Companion discovery is not yet updated for that build, so the end-to-end two-player path is not ready for release. Enemy/combat sync and direct animation writes remain disabled because their previous hook ABI/entity mapping was unsafe. DX12 overlay rendering is experimental and off by default; the Present hook remains tick-only.
 
 ## What's New in 0.3.1
 
@@ -47,7 +47,10 @@ A co-op multiplayer mod for [Crimson Desert](https://store.steampowered.com/app/
 - **MSVC /W4 + /permissive- on cdcoop_core** - Tightened compiler warnings to catch common issues in project sources without affecting third-party deps.
 - **Offset cleanup** - The estimated actor animation offsets (`0x120 / 0x124 / 0x130 / 0x131`, etc.) are kept but clearly marked `DEPRECATED` in `game_structures.h`. The new canonical path is `offsets::AnimationEvaluator::*`. Stamina/spirit offset relationship (`entry + CURRENT_VALUE`) is now documented inline.
 
-## How It Works
+## Intended Flow
+
+The following is the target two-player flow. It is not release-ready until the
+current companion entity path and two-machine Steam session are verified.
 
 1. **Host starts a session** (press F7 in-game) - their game becomes the shared world
 2. **Client connects** via Steam friend invite or Steam ID
@@ -81,7 +84,8 @@ These features are **still not fully functional in-game** and need further resea
 
 | Feature | Status | What's Blocking It |
 |---------|--------|--------------------|
-| Player position / health | Network path implemented, field testing required | Requires refreshed core signatures on the July 2026+ game build; world-origin rebasing still needs verification |
+| Player position / health | Local reads verified on Steam build `25050808`; network path implemented | Two-peer field testing and world-origin rebasing still need verification |
+| Companion / remote player | Current-build discovery unresolved | Legacy actor body slots no longer contain companion entities; a visible companion is needed for live structure tracing |
 | Animation sync (cross-model) | Direct actor writes disabled | Per-model animation IDs still need PAZ extraction and the evaluator must be mapped per remote companion |
 | Enemy / combat sync | Disabled | Previous ActorManager enumeration and pointer-derived IDs were not valid across processes |
 | DX12 overlay | Experimental, off by default | The game's DirectX command queue and cross-queue fence lifecycle are not yet captured safely |
@@ -293,35 +297,27 @@ Some of these pages require manual human access (403 for automated tools). **If 
 | [OpenCheatTables Thread](https://opencheattables.com/viewtopic.php?t=1836) | bbfox CT discussion and refreshed stat offsets; currently mirrored into docs where accessible | LOW |
 | [CD Companion source](https://github.com/leandrodiogenes/cd-companion) | Physics-delta teleport, static XYZ globals, map marker capture, camera heading hook | LOW |
 
-### What's Already Working (Verified Offsets)
+### Offset Status
 
 | Category | Status | Key Details |
 |----------|--------|-------------|
-| **Player Entity** | Verified | WorldSystem -> ActorManager -> UserActor chain, 3 fallback sigs |
-| **Position** | Verified | actor->+0x40->+0x08->core->+0x248->struct->+0x90 (float32 X/Y/Z) |
-| **Health/Stamina/Spirit** | Verified | StatEntry 16-byte struct via stats component at +0x58 (int64, value*1000). Current public bbfox CT v29 layout uses stamina/spirit at +0x518 / +0x5A8; legacy +0x488 / +0x518 retained as fallback |
-| **Rotation** | Verified | Quaternion at position_struct+0xA0, synced at 30Hz |
-| **Companion System** | Verified | Body slots +0xD0 through +0x108, AI controller at +0x48 |
-| **Damage Tracking** | Verified | Damage slot and value capture via dedicated hooks |
-| **Enemy HP/State** | Verified | Same actor+stat layout as player; aggro at +0x150, state at +0x158 |
-| **Inventory** | Verified | Chain from character slot: +0xB8->+0x18->+0x08 |
-| **Item Structure** | Verified | ID at +0x08, refinement at +0x0A, amount at +0x10, reinforcement at +0x50 |
-| **ATK/DEF** | Verified | Via chain: slot->+0x20->+0x18->+0x38 |
-| **Camera Zoom/FOV** | Verified | Camera struct+0xD8 via r12 hook capture |
-| **Base Supply** | Verified | Points, money, food, wood, ore, craft at known offsets |
-| **Contribution** | Verified | Level at +0x08, experience at +0x10 |
-| **Trust System** | Verified | Trust value at struct+0x10, gift and shop NPC paths |
-| **Reputation** | Verified | Gain setter at +1B4C98E, no-decrease at +1B4C971 (from bbfox0703 CT) |
-| **Resistance Attrs** | Verified | Injection at +12D1DFC, stride 0x20, scale 50M/level (from bbfox0703 CT) |
-| **Combat State Flag** | Verified | RIP-relative AOB, combat byte at resolved_ptr+0x1A (from JustSkip) |
-| **Durability** | Verified | Write, delta, and abyss AOBs with primary/fallback (from Orcax) |
-| **Dragon Timer** | Verified | r13+0x160 float, AOB integrated |
-| **Mount HP (Horse)** | Verified | Dynamic capture via hook steps (pointer only resolves while mounted) |
+| **Player Entity** | Verified on build `25050808` | WorldSystem -> ActorManager -> ChildActor -> component table -> StatusComponent -> player data |
+| **Position** | Verified read on build `25050808` | TransformSync `+0x63C`, float32 XYZ |
+| **Health** | Verified read on build `25050808` | StatEntry via player data `+0x58`, int64 value*1000 |
+| **Stamina/Spirit** | Needs refresh | May 2026 candidate offsets do not have the expected type IDs on build `25050808` |
+| **Rotation** | Verified read on build `25050808` | Quaternion at TransformSync `+0x62C` |
+| **Companion System** | Broken on current build | Legacy body slots are invalid; current companion entity path is unresolved |
+| **Damage Tracking** | Disabled / current-build unverified | Legacy AOBs are retained as research only |
+| **Enemy HP/State** | Disabled / current-build unverified | Actor enumeration and cross-process IDs are unresolved |
+| **Inventory / items / ATK/DEF** | Legacy research | Not revalidated on build `25050808` and not used by the current co-op path |
+| **Camera Zoom/FOV** | Legacy research | Direct hook is disabled pending a register-correct current-build validation |
+| **Progression systems** | Legacy research | Supply, contribution, trust, reputation, resistance and durability data are not used by co-op |
+| **Combat State / Dragon / Mount** | Experimental or unverified | Opt-in signatures require current-build in-game validation before release use |
 | **Fast-Travel Capture** | Implemented (opt-in) | `SafetyHookMid` at `+0xAB5594` reads `[r15+0x1C..0x28]`; host broadcasts `TELEPORT_TRIGGER` |
-| **Mount HP / Stamina Sync** | Implemented (opt-in) | `MOUNT_PTR_CAPTURE` mid-hook + `MountSync` polls at 5Hz, broadcasts `MOUNT_STATE`; overlay shows peer's bars. Stamina read path validates current-vs-legacy StatEntry layout |
-| **DX12 Present** | Implemented | Hook for ImGui overlay and frame tick |
-| **Steam P2P** | Implemented | ISteamNetworkingSockets with reliable/unreliable channels |
-| **40+ AOB Signatures** | Verified | Primary/fallback patterns from community mods |
+| **Mount HP / Stamina Sync** | Implemented but unverified on current build | Opt-in hook and packet path exist; current mount/stat offsets still need live validation |
+| **DX12 Present** | Verified on build `25050808` | Tick-only hook installed and ran without enabling experimental rendering |
+| **Steam P2P** | Compile-tested | ISteamNetworkingSockets builds and packet tests pass; two-machine runtime test remains |
+| **40+ AOB Signatures** | Mixed validity | Core WorldSystem, PlayerBase, Stats, Position and ChildActor AOBs match build `25050808`; optional signatures were not all retested |
 
 ### Related Projects & Offset Sources
 

@@ -2,24 +2,25 @@
 
 This document explains how to find the memory offsets and function signatures needed for the co-op mod. Many offsets are already verified and integrated - see the **Current Status** section below for what's done and what still needs work.
 
-## Current Status (May 2026 public tables / legacy v1.01 fallback)
+## Current Status (Steam build 25050808 / legacy v1.01 fallback)
 
 | Category | Status | Details |
 |----------|--------|---------|
-| Player entity / WorldSystem chain | **Verified** | 3 fallback sigs, static base pointer, dynamic resolution |
-| Position (authoritative) | **Verified** | actor->+0x40->+0x08->core->+0x248->struct->+0x90 (float32) |
-| Health / Stamina / Spirit | **Verified** | StatEntry at +0x58, int64 (value*1000). bbfox CT v29 uses stamina/spirit current at +0x518 / +0x5A8; legacy v1.01 layout kept as fallback |
-| Rotation | **Verified** | Quaternion at position_struct+0xA0 |
-| Companion / body slots | **Verified** | +0xD0 through +0x108 (8 slots), AI controller at +0x48 |
-| Damage tracking | **Verified** | Damage slot hook with source/amount capture |
-| Enemy HP / state | **Verified** | Same actor layout; aggro +0x150, state +0x158 |
-| Inventory / items | **Verified** | Full item struct, inventory chain from character slot |
-| Reputation | **Verified** | Gain setter at +1B4C98E, no-decrease at +1B4C971 |
-| Resistance attributes | **Verified** | Injection at +12D1DFC, stride 0x20 |
-| Camera zoom/FOV | **Verified** | +0xD8 via r12 capture; CD Companion adds a camera-heading hook at r15+0x4A4 |
-| Dragon timer | **Verified** | r13+0x160 float |
-| Mount HP (horse) | **Verified** | Dynamic capture (pointer only valid while mounted) |
-| 40+ AOB signatures | **Verified** | Primary/fallback patterns |
+| Player entity / WorldSystem chain | **Verified** | 3 WorldSystem AOBs uniquely match; current component chain verified live on build 25050808 |
+| Position (read) | **Verified** | `ClientTransformSyncActorComponent+0x63C`, float32 XYZ; confirmed with before/after movement snapshots |
+| Health | **Verified** | Player data +0x58 -> StatEntry, int64 value*1000; live read matched 300/300 HP |
+| Stamina / Spirit | **Needs refresh** | May 2026 offsets remain as legacy candidates, but their expected type IDs did not match build 25050808 |
+| Rotation (read) | **Verified** | Quaternion at `ClientTransformSyncActorComponent+0x62C`; live norm and facing changes verified |
+| Companion / body slots | **Broken on current build** | Legacy player-data +0xD0..+0x108 layout is no longer a companion array; current discovery needs a visible companion trace |
+| Damage tracking | **Disabled / needs refresh** | Legacy AOB retained, but the unsafe inline hook is disabled and current ABI is unverified |
+| Enemy HP / state | **Disabled / needs refresh** | Current ActorManager enumeration and entity mapping are unresolved |
+| Inventory / items | **Legacy research** | Not used by the current co-op path and not revalidated on build 25050808 |
+| Reputation | **Legacy research** | Historical gain/no-decrease RVAs are not used by co-op or revalidated on build 25050808 |
+| Resistance attributes | **Legacy research** | Historical injection offset is not used by co-op or revalidated on build 25050808 |
+| Camera zoom/FOV | **Legacy research** | Direct hook remains disabled pending current-build register validation |
+| Dragon timer | **Needs current-build test** | Historical r13+0x160 candidate is opt-in and was not exercised |
+| Mount HP (horse) | **Needs current-build test** | Dynamic capture exists but was not exercised during build 25050808 validation |
+| 40+ AOB signatures | **Mixed validity** | Core AOBs match build 25050808; optional signatures were not all retested |
 | Animation state | **Likely wrong** | 0x120 / 0x124 estimated, but CDAnimCancel shows animation runs via .paac action charts, not simple actor fields |
 | Combat flags (per-action) | **Estimated** | 0x130 / 0x131 - CDAnimCancel found evaluator flag at `[rbx+0x6A]` but on evaluator struct, not actor base |
 | Quest manager | **Missing** | Not found |
@@ -61,32 +62,27 @@ This document explains how to find the memory offsets and function signatures ne
 
 The `CrimsonDesert-player-status-modifier` project already hooks player stat writes. Study their signatures and hook points to find the player pointer - it's typically the first argument (`rcx` on x64 Windows) to the hooked function.
 
-### Verified Player Structure Layout
+### Verified Player Structure Layout (Steam build 25050808)
 
 ```
-Player Actor Base:
-+0x00   ptr      VTable
-+0x20   ptr      Status marker
-+0x40   ptr      -> +0x08 -> player_core (VERIFIED)
-+0x48   ptr      Component link / AI controller
-+0x58   ptr      Stats component base (VERIFIED)
-+0xD0   ptr[8]   Body slots (companion/child actors, +0x08 stride)
-
-Player Core -> Position:
-+0x248  ptr      -> position_struct (VERIFIED)
-  +0x90 float    X position (VERIFIED)
-  +0x94 float    Y position (VERIFIED)
-  +0x98 float    Z position (VERIFIED)
-  +0x9C float    W/padding
-  +0xA0 float[4] Rotation quaternion (VERIFIED)
+WorldSystem
++0x30   ptr      ClientActorManager
+  +0x50 ptr      ClientChildOnlyInGameActor
+    +0x68 ptr    Component table
+      +0x20 ptr  ClientStatusActorComponent
+        +0x18 ptr  Player data
+          +0x58 ptr  Stats component
+      +0x1A0 ptr ClientTransformSyncActorComponent
+        +0x62C float[4] Rotation quaternion
+        +0x63C float[3] Position XYZ
 
 Stats Component (+0x58):
 +0x08  int64    Health current (value * 1000) (VERIFIED)
 +0x18  int64    Health max (VERIFIED)
-+0x518 int64    Stamina current (VERIFIED, May 2026 / bbfox CT v29)
-+0x528 int64    Stamina max (VERIFIED, May 2026 / bbfox CT v29)
-+0x5A8 int64    Spirit current (VERIFIED, May 2026 / bbfox CT v29)
-+0x5B8 int64    Spirit max (VERIFIED, May 2026 / bbfox CT v29)
++0x518 int64    Stamina current (May 2026 candidate; not valid by type ID on build 25050808)
++0x528 int64    Stamina max (May 2026 candidate)
++0x5A8 int64    Spirit current (May 2026 candidate; not valid by type ID on build 25050808)
++0x5B8 int64    Spirit max (May 2026 candidate)
 
 Legacy v1.01 layout kept as fallback:
 +0x488 int64    Stamina current
@@ -108,11 +104,11 @@ Animation (ESTIMATED - likely incorrect approach):
 
 Companions (Oongka, Yann, Naira) are key to the co-op approach - we hijack one for Player 2.
 
-The companion system is already verified:
-- Companions are found via body slots on the player actor (+0xD0 through +0x108)
-- AI Controller at +0x48 (null it to disable AI)
-- Same position/animation layout as player
-- IS_ACTIVE flag at +0x1C (PartInOutSocket visible byte)
+The legacy companion path is not valid on Steam build 25050808. The old
+player-data `+0xD0..+0x108` range no longer contains a companion pointer array.
+Locating the current companion entity requires a live trace while a companion
+is visible. Do not write the legacy AI-controller or position offsets on this
+build.
 
 Character slot offsets (from bbfox0703 CT, v1.01.03):
 | Character | Slot Offset |
@@ -126,7 +122,9 @@ Character slot offsets (from bbfox0703 CT, v1.01.03):
 **Already verified.** The WorldSystem singleton is found via RIP-relative signature scanning:
 
 ```
-WorldSystem (sig scan) -> ActorManager (+0x30) -> UserActor (+0x28)
+WorldSystem (sig scan) -> ActorManager (+0x30) -> ChildActor (+0x50)
+    -> component table (+0x68) -> StatusComponent (+0x20)
+    -> player data (+0x18)
 ```
 
 Three fallback patterns exist in `game_structures.h` (WORLD_SYSTEM_P1/P2/P3).
@@ -248,17 +246,24 @@ From FearLess CE community and CrimsonDesert-player-status-modifier:
 - Body -> VisCtrl chain: +0x68 -> +0x40 -> +0xE8
 - Actor type detection: +0x48 -> +0x08 -> +0x88 -> +0x01 (type byte)
 
-### WorldSystem Chain (from EquipHide)
+### WorldSystem Chain
 - WorldSystem is a singleton found via RIP-relative pointer in signature scan
 - ActorManager at WorldSystem + 0x30
-- UserActor (player) at ActorManager + 0x28
+- ClientChildOnlyInGameActor at ActorManager + 0x50
+- ClientUserActor wrapper at ActorManager + 0x58
+- Current player data is reached through ChildActor +0x68 -> component table
+  +0x20 -> ClientStatusActorComponent +0x18
 
-### Position Data (Verified)
-**Authoritative position chain:**
+### Position Data (Verified Read Path, build 25050808)
 ```
-actor -> +0x40 -> +0x08 -> player_core -> +0x248 -> position_struct -> +0x90
+component table -> +0x1A0 -> ClientTransformSyncActorComponent
+    rotation quaternion: +0x62C
+    position XYZ:        +0x63C
 ```
-- Position is float32 components (4 bytes each, verified)
+- Position is float32 XYZ and changed consistently with controlled player movement.
+- The quaternion at +0x62C remained normalized and changed with facing direction.
+- This is currently a verified read path only; remote companion writes are not enabled for it.
+- The legacy `actor -> +0x40 -> +0x08 -> +0x248 -> +0x90` path does not resolve on build 25050808.
 - Position write instruction at `CrimsonDesert.exe+36ADB8C`: `41 0F 11 45 00` (movups [r13+00], xmm0)
 
 **Hook-time direct access** (via PositionHeightAccess sig):
@@ -420,6 +425,6 @@ Offsets WILL change with game patches. Maintain a version table:
 | 1.00.03     | Verified    | Verified  | Verified        | March 25 patch |
 | 1.01.03     | Verified    | Verified  | Verified        | March hotfix, legacy stat spacing |
 | May 2026 public tables | Unchanged in public sources | Verified via bbfox CT v29 | Unchanged in public sources | Stamina/spirit entry deltas moved to +0x510 / +0x5A0 from health entry |
-| July 4 2026 patch | Broken | Broken | Broken | Published core signatures no longer match. Version 0.3.1 fails closed until a new scan is verified. |
+| Steam build 25050808 | Verified read at TransformSync +0x63C | Health verified; stamina/spirit need refresh | Verified | Live-tested locally. Player component chain refreshed; companion discovery remains unresolved. |
 
 Use the signature scanner to automatically find updated offsets after patches rather than hardcoding addresses.
