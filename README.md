@@ -129,13 +129,15 @@ cmake --build build --config Release
 
 ## Installation
 
-### Recommended: Using a Mod Manager
+### Recommended: CDUMM
 
-This mod works with [JSON Mod Manager](https://www.nexusmods.com/crimsondesert/mods/113), which handles ASI loader setup and mod conflict detection automatically.
+This is a native-code mod, so the runtime payload remains an ASI plugin. Current
+[CDUMM](https://www.nexusmods.com/crimsondesert/mods/207) releases can import ASI
+plugins and mixed ZIP packages alongside JSON/PAZ data mods.
 
-1. Install **JSON Mod Manager** following its instructions
-2. Place `CrimsonDesertCoop.asi` and `cdcoop_config.json` into JSON Mod Manager's `mods/` folder
-3. Launch the game through JSON Mod Manager
+1. Install **CDUMM** and complete its game-directory setup
+2. Drop the release ZIP into CDUMM and enable CrimsonDesertCoop in its ASI section
+3. Apply the mod and launch the game through CDUMM
 
 ### Manual Installation
 
@@ -147,7 +149,7 @@ This mod works with [JSON Mod Manager](https://www.nexusmods.com/crimsondesert/m
 
 ### Compatibility
 
-- Compatible with [CDUMM](https://www.nexusmods.com/crimsondesert/mods/207) and [JSON Mod Manager](https://www.nexusmods.com/crimsondesert/mods/113)
+- Recommended with [CDUMM](https://www.nexusmods.com/crimsondesert/mods/207); legacy [JSON Mod Manager](https://www.nexusmods.com/crimsondesert/mods/113) also supports ASI plugins
 - Compatible with most PAZ-based mods (camera, visuals, equipment)
 - **May conflict** with other ASI mods that hook the same game functions (damage, position writes). If using alongside the [player-status-modifier](https://www.nexusmods.com/crimsondesert/mods/52), disable overlapping features in the config
 
