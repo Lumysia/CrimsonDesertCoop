@@ -13,8 +13,12 @@
 #include <cdcoop/core/memory.h>
 #include <cdcoop/network/session.h>
 #include <cdcoop/network/steam_network.h>
+#include <cdcoop/sync/player_sync.h>
+#include <cdcoop/sync/enemy_sync.h>
+#include <cdcoop/sync/world_sync.h>
 #include <cdcoop/sync/mount_sync.h>
 #include <cdcoop/player/companion_hijack.h>
+#include <cdcoop/player/player_manager.h>
 #include <cdcoop/sync/animation_sync.h>
 #include <cdcoop/ui/overlay.h>
 
