@@ -41,8 +41,14 @@ struct Config {
     // Keep GPU overlay injection opt-in; Present is still hooked for ticking.
     bool enable_experimental_overlay = false;
     // Install a read-only mid-hook that counts authoritative position writes
-    // and reports whether they target the selected companion TransformSync.
+    // and correlates the physics-layer destination with the selected companion.
     bool diagnose_companion_position_write = false;
+    // Apply remote position updates at the correlated engine-thread store.
+    // Disabled until explicitly enabled after validating the current game build.
+    bool enable_companion_position_override = false;
+    // Hold the correlated companion two metres to the side for a few seconds.
+    // One-shot diagnostic used to validate the write path without a second PC.
+    bool test_companion_position_write = false;
     // When true, after WorldSystem resolves, scan its sibling pointers and
     // log their vtable RVAs to cdcoop_world_probe.log to help the community
     // identify the quest / cutscene / world-object managers.
@@ -65,6 +71,7 @@ struct Config {
         debug_overlay, log_packets, log_level,
         enable_experimental_hooks,
         enable_experimental_overlay, diagnose_companion_position_write,
+        enable_companion_position_override, test_companion_position_write,
         dump_world_system_probe,
         toggle_overlay_key, open_session_key
     )

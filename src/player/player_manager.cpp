@@ -87,7 +87,9 @@ void PlayerManager::update(float delta_time) {
     }
 
     const bool should_select_companion = Session::instance().is_active() ||
-                                         cfg.diagnose_companion_position_write;
+                                         cfg.diagnose_companion_position_write ||
+                                         cfg.enable_companion_position_override ||
+                                         cfg.test_companion_position_write;
     if (should_select_companion && !is_remote_spawned()) {
         remote_spawn_retry_timer_ += delta_time;
         if (remote_spawn_retry_timer_ >= 1.0f) {
@@ -98,7 +100,9 @@ void PlayerManager::update(float delta_time) {
         remote_spawn_retry_timer_ = 0.0f;
     }
 
-    if (cfg.diagnose_companion_position_write) {
+    if (cfg.diagnose_companion_position_write ||
+        cfg.enable_companion_position_override ||
+        cfg.test_companion_position_write) {
         companion_probe_log_timer_ += delta_time;
         if (companion_probe_log_timer_ >= 1.0f) {
             companion_probe_log_timer_ = 0.0f;
@@ -256,7 +260,12 @@ void PlayerManager::spawn_remote_player() {
         }
     }
 
-    spdlog::warn("Remote companion candidate selected; pose application is disabled");
+    if (get_config().enable_companion_position_override) {
+        spdlog::warn("Remote companion candidate selected; position override is opt-in, "
+                     "rotation remains disabled");
+    } else {
+        spdlog::warn("Remote companion candidate selected; pose application is disabled");
+    }
 }
 
 void PlayerManager::despawn_remote_player() {

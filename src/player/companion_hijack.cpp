@@ -3,9 +3,35 @@
 #include <cdcoop/core/game_structures.h>
 #include <spdlog/spdlog.h>
 #include <cmath>
+#include <cstring>
 #include <limits>
 
 namespace cdcoop {
+
+namespace {
+bool read_stable_position(uintptr_t transform, Vec3& position) {
+    if (transform > UINTPTR_MAX - offsets::Player::TRANSFORM_POSITION) return false;
+    const uintptr_t address = transform + offsets::Player::TRANSFORM_POSITION;
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        if (!is_readable(address, sizeof(Vec3))) return false;
+        const Vec3 first = read_mem<Vec3>(
+            transform, offsets::Player::TRANSFORM_POSITION);
+        if (!is_readable(address, sizeof(Vec3))) return false;
+        const Vec3 second = read_mem<Vec3>(
+            transform, offsets::Player::TRANSFORM_POSITION);
+        constexpr float kMaxCoordinate = 10'000'000.0f;
+        if (std::memcmp(&first, &second, sizeof(Vec3)) == 0 &&
+            std::isfinite(first.x) && std::isfinite(first.y) &&
+            std::isfinite(first.z) && std::abs(first.x) <= kMaxCoordinate &&
+            std::abs(first.y) <= kMaxCoordinate &&
+            std::abs(first.z) <= kMaxCoordinate) {
+            position = first;
+            return true;
+        }
+    }
+    return false;
+}
+} // namespace
 
 CompanionHijack& CompanionHijack::instance() {
     static CompanionHijack inst;
@@ -137,8 +163,30 @@ bool CompanionHijack::activate() {
         return false;
     }
 
-    hooks::set_companion_position_probe_target(
+    Vec3 selected_position{};
+    if (!read_stable_position(hijacked_transform_, selected_position)) {
+        spdlog::warn("CompanionHijack: companion transform changed during capture");
+        deactivate();
+        return false;
+    }
+    hijacked_target_epoch_ = hooks::set_companion_position_probe_target(
         hijacked_transform_ + offsets::Player::TRANSFORM_POSITION);
+    if (!hooks::update_companion_position_probe_reference(
+            hijacked_transform_ + offsets::Player::TRANSFORM_POSITION,
+            hijacked_target_epoch_, selected_position.x,
+            selected_position.y, selected_position.z)) {
+        hooks::revoke_companion_position_probe_target(
+            hijacked_transform_ + offsets::Player::TRANSFORM_POSITION,
+            hijacked_target_epoch_);
+        actor_registry_ = 0;
+        hijacked_entity_ = 0;
+        hijacked_transform_ = 0;
+        hijacked_stats_ = 0;
+        hijacked_target_epoch_ = 0;
+        hijacked_slot_ = -1;
+        active_ = false;
+        return false;
+    }
     spdlog::info("CompanionHijack: selected actor {} at 0x{:X} ({:.1f}m away)",
                  hijacked_slot_, hijacked_entity_, std::sqrt(nearest_distance_sq));
     return true;
@@ -154,6 +202,7 @@ void CompanionHijack::deactivate() {
     hijacked_entity_ = 0;
     hijacked_transform_ = 0;
     hijacked_stats_ = 0;
+    hijacked_target_epoch_ = 0;
     hijacked_slot_ = -1;
     active_ = false;
 }
@@ -163,9 +212,16 @@ void CompanionHijack::invalidate() {
 }
 
 bool CompanionHijack::is_active() const {
+    const uintptr_t expected_target =
+        hijacked_transform_ <= UINTPTR_MAX - offsets::Player::TRANSFORM_POSITION
+        ? hijacked_transform_ + offsets::Player::TRANSFORM_POSITION : 0;
     if (!active_ || hijacked_slot_ < 0 || !is_valid_ptr(actor_registry_) ||
         !is_valid_ptr(hijacked_entity_) || !is_valid_ptr(hijacked_transform_) ||
         !is_valid_ptr(hijacked_stats_)) {
+        if (active_) {
+            hooks::revoke_companion_position_probe_target(
+                expected_target, hijacked_target_epoch_);
+        }
         return false;
     }
 
@@ -188,6 +244,8 @@ bool CompanionHijack::is_active() const {
             static_cast<uint32_t>(hijacked_slot_) *
                 static_cast<uint32_t>(sizeof(uintptr_t))) != hijacked_entity_ ||
         !is_child_actor(hijacked_entity_)) {
+        hooks::revoke_companion_position_probe_target(
+            expected_target, hijacked_target_epoch_);
         return false;
     }
 
@@ -205,11 +263,30 @@ bool CompanionHijack::is_active() const {
         status, offsets::Player::STATUS_PLAYER_DATA);
     const uintptr_t stats = read_mem<uintptr_t>(
         player_data, offsets::Player::STAT_COMPONENT);
-    return is_readable(ai, sizeof(uintptr_t)) &&
-           is_readable(mercenary, sizeof(uintptr_t)) && transform == hijacked_transform_ &&
-           is_readable(transform + offsets::Player::TRANSFORM_ROTATION_QUAT,
-                       sizeof(Quat) + sizeof(Vec3)) && stats == hijacked_stats_ &&
-           read_mem<int32_t>(stats, StatEntry::TYPE) == StatEntry::HEALTH_ID;
+    const bool valid = is_readable(ai, sizeof(uintptr_t)) &&
+                       is_readable(mercenary, sizeof(uintptr_t)) &&
+                       transform == hijacked_transform_ &&
+                       is_readable(transform + offsets::Player::TRANSFORM_ROTATION_QUAT,
+                                   sizeof(Quat) + sizeof(Vec3)) &&
+                       stats == hijacked_stats_ &&
+                       read_mem<int32_t>(stats, StatEntry::TYPE) == StatEntry::HEALTH_ID;
+    if (valid) {
+        Vec3 position{};
+        if (!read_stable_position(transform, position)) {
+            hooks::revoke_companion_position_probe_target(
+                expected_target, hijacked_target_epoch_);
+            return false;
+        }
+        if (!hooks::update_companion_position_probe_reference(
+                expected_target, hijacked_target_epoch_,
+                position.x, position.y, position.z)) {
+            return false;
+        }
+    } else {
+        hooks::revoke_companion_position_probe_target(
+            expected_target, hijacked_target_epoch_);
+    }
+    return valid;
 }
 
 uintptr_t CompanionHijack::get_entity_ptr() const {
@@ -217,10 +294,11 @@ uintptr_t CompanionHijack::get_entity_ptr() const {
 }
 
 void CompanionHijack::set_position(const Vec3& pos, const Quat& rot) {
-    // Direct TransformSync writes race the companion AI and visibly oscillate.
-    // Clearing the AI component slot held the pose but later crashed the game,
-    // so remote pose application stays disabled until a safe AI/update hook is found.
-    (void)pos;
+    if (is_active()) {
+        hooks::set_companion_position_override(
+            hijacked_transform_ + offsets::Player::TRANSFORM_POSITION,
+            hijacked_target_epoch_, pos.x, pos.y, pos.z);
+    }
     (void)rot;
 }
 

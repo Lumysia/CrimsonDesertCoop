@@ -6,8 +6,9 @@
 namespace cdcoop {
 
 // Locates and tracks a companion candidate for a future player-2 takeover.
-// Current-build state writes are disabled until the engine's AI/update path can
-// be intercepted without racing or invalidating component ownership.
+// Position writes use an opt-in engine-thread hook after the physics destination
+// has been correlated with this actor. Rotation, animation, and health remain
+// disabled until their ownership paths are verified.
 //
 // This approach is chosen because:
 // 1. The game already handles companion rendering, collision, and camera
@@ -32,7 +33,7 @@ public:
     uintptr_t get_entity_ptr() const;
     bool is_active() const;
 
-    // Disabled current-build state application entry points.
+    // Position is opt-in; rotation is currently ignored. Other state writes are disabled.
     void set_position(const Vec3& pos, const Quat& rot);
     void set_animation(uint32_t anim_id, float blend, float speed, float time);
     void set_health(float health, float max_health);
@@ -44,6 +45,7 @@ private:
     uintptr_t hijacked_entity_ = 0;    // ClientChildOnlyInGameActor
     uintptr_t hijacked_transform_ = 0; // ClientTransformSyncActorComponent
     uintptr_t hijacked_stats_ = 0;     // Health StatEntry
+    uint64_t hijacked_target_epoch_ = 0;
     int hijacked_slot_ = -1;           // Index in ActorManager registry
     bool active_ = false;
 };

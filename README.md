@@ -4,7 +4,7 @@ A co-op multiplayer mod for [Crimson Desert](https://store.steampowered.com/app/
 
 > **Status: 0.3.1 Pre-Alpha - Safe Player-Sync Baseline**
 >
-> Steam connection polling, handshake retry, position interpolation, and health state handling form the current testable baseline. Steam build `25050808` has verified WorldSystem, local-player, TransformSync position/rotation, health reads, and active companion enumeration. Direct companion pose writes race AI, and removing the AI component caused a delayed crash, so remote pose application remains disabled until a safe engine update hook is found. The end-to-end two-player path is not ready for release. Enemy/combat sync and direct animation writes remain disabled because their previous hook ABI/entity mapping was unsafe. DX12 overlay rendering is experimental and off by default; the Present hook remains tick-only.
+> Steam connection polling, handshake retry, position interpolation, and health state handling form the current testable baseline. Steam build `25050808` has verified WorldSystem, local-player, TransformSync position/rotation, health reads, active companion enumeration, and correlation of a companion physics-position store. Remote position application remains opt-in while its controlled write test and two-PC behavior are validated; rotation, health, animation, enemy, and combat writes remain disabled. The end-to-end two-player path is not ready for release. DX12 overlay rendering is experimental and off by default; the Present hook remains tick-only.
 
 ## What's New in 0.3.1
 
@@ -85,7 +85,7 @@ These features are **still not fully functional in-game** and need further resea
 | Feature | Status | What's Blocking It |
 |---------|--------|--------------------|
 | Player position / health | Local reads verified on Steam build `25050808`; network path implemented | Two-peer field testing and world-origin rebasing still need verification |
-| Companion / remote player | Discovery verified; pose writes disabled | ActorManager's persistent registry and Mercenary filter locate the nearest companion. Direct TransformSync writes race AI; clearing the AI component caused a delayed crash. A safe AI/update hook is still required. Remote health is not written into save-backed companion stats |
+| Companion / remote player | Discovery and physics mapping verified; position write test pending | ActorManager's registry locates the nearest companion. The engine-thread physics store is correlated over repeated `(r13,rbx)` matches, but remote position override remains opt-in until controlled and two-PC tests pass. Rotation and save-backed health writes remain disabled |
 | Animation sync (cross-model) | Direct actor writes disabled | Per-model animation IDs still need PAZ extraction and the evaluator must be mapped per remote companion |
 | Enemy / combat sync | Disabled | Previous ActorManager enumeration and pointer-derived IDs were not valid across processes |
 | DX12 overlay | Experimental, off by default | The game's DirectX command queue and cross-queue fence lifecycle are not yet captured safely |
@@ -201,6 +201,8 @@ Edit `cdcoop_config.json` in the game directory. The file is auto-created with d
 
     "enable_experimental_hooks": false,
     "diagnose_companion_position_write": false,
+    "enable_companion_position_override": false,
+    "test_companion_position_write": false,
     "dump_world_system_probe": false,
 
     "toggle_overlay_key": 119,
@@ -228,7 +230,9 @@ Edit `cdcoop_config.json` in the game directory. The file is auto-created with d
 | `log_packets` | `false` | Log network packets to cdcoop.log |
 | `log_level` | `2` | 0=trace, 1=debug, 2=info, 3=warn, 4=error |
 | `enable_experimental_hooks` | `false` | Install CDAnimCancel animation-evaluator hook and dragon HP probe. Disable if mod becomes unstable after a game patch |
-| `diagnose_companion_position_write` | `false` | Install a diagnostic mid-hook at the authoritative position store and log whether it runs for the selected companion. The detour does not change saved registers or game-state data |
+| `diagnose_companion_position_write` | `false` | Install the companion physics-position probe and log coordinate correlation without changing the saved context |
+| `enable_companion_position_override` | `false` | Apply remote XYZ at the correlated engine-thread position store. Experimental and fail-closed; rotation is not applied |
+| `test_companion_position_write` | `false` | One-shot diagnostic: after 30 consecutive identity/coordinate matches, hold the companion two metres to the side for three seconds |
 | `dump_world_system_probe` | `false` | Walk WorldSystem sibling pointers once after resolve and log their vtable RVAs to `cdcoop_world_probe.log`. Safe, read-only telemetry |
 | `toggle_overlay_key` | `119` | F8 keycode |
 | `open_session_key` | `118` | F7 keycode |
@@ -308,7 +312,7 @@ Some of these pages require manual human access (403 for automated tools). **If 
 | **Health** | Verified read on build `25050808` | StatEntry via player data `+0x58`, int64 value*1000 |
 | **Stamina/Spirit** | Needs refresh | May 2026 candidate offsets do not have the expected type IDs on build `25050808` |
 | **Rotation** | Verified read on build `25050808` | Quaternion at TransformSync `+0x62C` |
-| **Companion System** | Discovery verified on build `25050808`; writes disabled | ActorManager registry (`array +0x128`, `capacity +0x134`); ChildActor entries with a Mercenary component at table `+0x118` are companions. Direct pose writes race AI, while clearing AI slot `+0x58` caused a delayed crash. A safe update hook is required; companion health writes are also disabled |
+| **Companion System** | Discovery and physics-position mapping verified on build `25050808` | ActorManager registry (`array +0x128`, `capacity +0x134`) and Mercenary component `+0x118` identify companions. The opt-in update hook requires 30 consecutive coordinate/identity matches before position writes; rotation and companion health writes remain disabled |
 | **Damage Tracking** | Disabled / current-build unverified | Legacy AOBs are retained as research only |
 | **Enemy HP/State** | Disabled / current-build unverified | Actor enumeration and cross-process IDs are unresolved |
 | **Inventory / items / ATK/DEF** | Legacy research | Not revalidated on build `25050808` and not used by the current co-op path |

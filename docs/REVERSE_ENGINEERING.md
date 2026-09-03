@@ -11,7 +11,7 @@ This document explains how to find the memory offsets and function signatures ne
 | Health | **Verified** | Player data +0x58 -> StatEntry, int64 value*1000; live read matched 300/300 HP |
 | Stamina / Spirit | **Needs refresh** | May 2026 offsets remain as legacy candidates, but their expected type IDs did not match build 25050808 |
 | Rotation (read) | **Verified** | Quaternion at `ClientTransformSyncActorComponent+0x62C`; live norm and facing changes verified |
-| Companion discovery | **Verified; writes disabled** | ActorManager persistent registry at +0x128 (capacity +0x134) and the Mercenary filter were confirmed live. Direct pose writes race AI; clearing the AI slot caused a delayed crash |
+| Companion discovery / physics mapping | **Verified; write test pending** | ActorManager persistent registry at +0x128 (capacity +0x134) and Mercenary filter were confirmed live. The `movups [r13],xmm0` physics destination tracked the selected companion over 118m of movement; write application remains opt-in |
 | Damage tracking | **Disabled / needs refresh** | Legacy AOB retained, but the unsafe inline hook is disabled and current ABI is unverified |
 | Enemy HP / state | **Disabled / needs refresh** | Current ActorManager enumeration and entity mapping are unresolved |
 | Inventory / items | **Legacy research** | Not used by the current co-op path and not revalidated on build 25050808 |
@@ -128,9 +128,10 @@ TransformSync write with that pointer intact was reverted by AI within 100 ms;
 even continuous 60 Hz writes only held the target in 60% of samples. Temporarily
 clearing the AI slot made a single pose write remain stable for a one-second
 test, but the game subsequently crashed. Nulling the component is unsafe and
-must not be used. `CompanionHijack` keeps pose and health writes disabled until
-a safe AI/update hook is identified; health writes could also persist a peer's
-max HP into the local save.
+must not be used. The replacement path changes `xmm0` at the correlated native
+physics update instead of racing TransformSync or removing AI ownership. It is
+still opt-in pending controlled-write and two-PC validation. Rotation and health
+writes remain disabled; health writes could persist a peer's max HP into the save.
 
 Character slot offsets (from bbfox0703 CT, v1.01.03):
 | Character | Slot Offset |
@@ -165,7 +166,7 @@ See `include/cdcoop/core/game_structures.h` namespace `signatures` for all 40+ p
 
 | Hook | Signature | Purpose |
 |------|-----------|---------|
-| CompanionPositionProbe (opt-in, diagnostic mid-hook) | `POSITION_PRIMARY` / `POSITION_FALLBACK` | Counts final `movups [r13],xmm0` hits and exact matches against selected companion TransformSync `+0x63C`; gated on `diagnose_companion_position_write`. The detour does not modify saved context or game-state data |
+| CompanionPositionProbe (opt-in correlated mid-hook) | `POSITION_PRIMARY` / `POSITION_FALLBACK` | Correlates the final `movups [r13],xmm0` physics destination with selected companion TransformSync XYZ over 30 consecutive `(r13,rbx)` matches. Diagnostic mode is read-only; separate flags gate remote writes and the one-shot test |
 | DamageSlot | Disabled | Previous inline detour used a function ABI at a mid-function register site |
 | StatWrite | Disabled | Not required for the player-state polling path; previous inline detour was unsafe |
 | CameraZoomFOV | Disabled | Must be rebuilt as a register-correct mid hook before use |
@@ -284,12 +285,15 @@ component table -> +0x1A0 -> ClientTransformSyncActorComponent
 ```
 - Position is float32 XYZ and changed consistently with controlled player movement.
 - The quaternion at +0x62C remained normalized and changed with facing direction.
-- Remote companion pose writes are disabled. Direct writes race AI, and clearing the AI component to prevent that race caused a delayed game crash.
+- Direct TransformSync writes race AI, and clearing the AI component to prevent that race caused a delayed game crash. Neither path is used.
 - The legacy `actor -> +0x40 -> +0x08 -> +0x248 -> +0x90` path does not resolve on build 25050808.
-- Position write instruction at `CrimsonDesert.exe+36ADB8C`: `41 0F 11 45 00` (movups [r13+00], xmm0)
+- The current-build position pattern resolves the final `41 0F 11 45 00` (`movups [r13],xmm0`) at RVA `0x3BB103C`.
+- Live movement correlation sampled 400 pairs over 20 seconds: TransformSync moved 117.94m, the physics vector moved 118.44m, 388 samples moved together, maximum X/Z delta was 0.18m, and Y varied from -0.16m to +0.37m due to collision/grounding.
+- The hook locks only after 30 consecutive coordinate matches for the same `(r13,rbx,target epoch)`, requires a fresh validation lease, and rechecks the target epoch before changing `xmm0`. `enable_companion_position_override` and `test_companion_position_write` are both off by default.
 
 **Hook-time direct access** (via PositionHeightAccess sig):
-- r13 = float* pointing directly at the position vector
+- r13 = physics-layer float4 position destination
+- rbx = stable physics owner observed for the correlated destination
 
 ### Static Player Base Pointer (from bbfox0703 CT, v1.01.03 legacy)
 ```
@@ -447,6 +451,6 @@ Offsets WILL change with game patches. Maintain a version table:
 | 1.00.03     | Verified    | Verified  | Verified        | March 25 patch |
 | 1.01.03     | Verified    | Verified  | Verified        | March hotfix, legacy stat spacing |
 | May 2026 public tables | Unchanged in public sources | Verified via bbfox CT v29 | Unchanged in public sources | Stamina/spirit entry deltas moved to +0x510 / +0x5A0 from health entry |
-| Steam build 25050808 | Read verified at TransformSync +0x63C; remote write disabled | Health read verified; companion health writes disabled; stamina/spirit need refresh | Verified | Live-tested locally. Player and companion discovery chains are verified. Direct pose writes race AI; clearing the AI component caused a delayed crash. |
+| Steam build 25050808 | Read verified at TransformSync +0x63C; physics write mapped at +0x3BB103C; controlled write pending | Health read verified; companion health writes disabled; stamina/spirit need refresh | Verified | Live-tested locally. Companion physics and TransformSync coordinates tracked over 118m; remote override remains opt-in until write and two-PC tests pass. |
 
 Use the signature scanner to automatically find updated offsets after patches rather than hardcoding addresses.

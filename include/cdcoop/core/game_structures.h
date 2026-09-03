@@ -167,7 +167,7 @@ namespace PartInOutSocket {
 //   position_owner -> +0x248 -> position_struct -> +0x90 (x,y,z,w float4)
 //   Status marker: [rdx+0x68] -> [rax+0x20]
 //
-// Position write instruction at CrimsonDesert.exe+36ADB8C:
+// Position write instruction on Steam build 25050808 at +0x3BB103C:
 //   41 0F 11 45 00 (movups [r13+00], xmm0)
 //   r13 points directly at the authoritative position vector
 //
@@ -317,8 +317,8 @@ namespace offsets {
         constexpr uint32_t STATUS_MARKER_2 = 0x20;  // Second deref to marker
 
         // Position write RVA (relative to CrimsonDesert.exe base):
-        // Instruction at +0x36ADB8C: 41 0F 11 45 00 (movups [r13+00], xmm0)
-        constexpr uint32_t POS_WRITE_RVA  = 0x36ADB8C;
+        // Instruction at +0x3BB103C: 41 0F 11 45 00 (movups [r13+00], xmm0)
+        constexpr uint32_t POS_WRITE_RVA  = 0x3BB103C;
 
         // DEPRECATED / ESTIMATED offsets on the actor base. CDAnimCancel's
         // reverse engineering of the BlackSpace .paac action-chart system shows

@@ -118,12 +118,20 @@ private:
 // Game function hooks - these are the specific hooks we install
 namespace hooks {
 
-// Read-only diagnostic at the authoritative position store. The detour only
-// compares r13 with an atomically published companion TransformSync address;
-// it never changes registers or game memory.
+// Companion physics-position store. It first correlates r13 with an atomically
+// published TransformSync position over repeated hits. Register writes are
+// permitted only for an explicit remote override or one-shot test.
 inline SafetyHookMid companion_position_probe_hook;
 void companion_position_probe_detour(SafetyHookContext& ctx);
-void set_companion_position_probe_target(uintptr_t target) noexcept;
+uint64_t set_companion_position_probe_target(uintptr_t target) noexcept;
+bool revoke_companion_position_probe_target(
+    uintptr_t expected_target, uint64_t expected_epoch) noexcept;
+bool update_companion_position_probe_reference(
+    uintptr_t expected_target, uint64_t expected_epoch,
+    float x, float y, float z) noexcept;
+void set_companion_position_override(
+    uintptr_t expected_target, uint64_t expected_epoch,
+    float x, float y, float z) noexcept;
 void log_companion_position_probe();
 
 // Player animation state hook
