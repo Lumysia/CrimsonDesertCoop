@@ -4,6 +4,9 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   windows:
     name: Windows (Steam ${{ matrix.steam }})
@@ -48,3 +51,53 @@ jobs:
           }
       - name: Test
         run: ctest --test-dir build -C Release --output-on-failure
+      - name: Package Steam build
+        if: matrix.steam == 'ON'
+        id: package
+        shell: pwsh
+        run: |
+          $version = if ($env:GITHUB_REF_TYPE -eq 'tag') {
+            $env:GITHUB_REF_NAME
+          } else {
+            git rev-parse --short HEAD
+          }
+          $packageDir = "dist/CrimsonDesertCoop-$version-win64"
+          New-Item -ItemType Directory -Path $packageDir -Force | Out-Null
+          Copy-Item build/bin/Release/CrimsonDesertCoop.asi $packageDir
+          Copy-Item README.md $packageDir
+          $archive = "$packageDir.zip"
+          Compress-Archive -Path "$packageDir/*" -DestinationPath $archive
+          $hash = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $(Split-Path $archive -Leaf)" | Set-Content "$archive.sha256"
+      - name: Upload Steam build
+        if: matrix.steam == 'ON'
+        uses: actions/upload-artifact@v4
+        with:
+          name: CrimsonDesertCoop-Steam-${{ github.sha }}
+          path: |
+            dist/*.zip
+            dist/*.sha256
+          compression-level: 0
+          retention-days: 7
+          if-no-files-found: error
+
+  release:
+    name: Publish release
+    if: github.ref_type == 'tag'
+    needs: windows
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download Steam build
+        uses: actions/download-artifact@v5
+        with:
+          name: CrimsonDesertCoop-Steam-${{ github.sha }}
+          path: dist
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh release create "$GITHUB_REF_NAME" dist/*
+          --verify-tag --generate-notes --prerelease
+          --title "CrimsonDesertCoop $GITHUB_REF_NAME"
