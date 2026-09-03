@@ -137,12 +137,15 @@ bool CompanionHijack::activate() {
         return false;
     }
 
+    hooks::set_companion_position_probe_target(
+        hijacked_transform_ + offsets::Player::TRANSFORM_POSITION);
     spdlog::info("CompanionHijack: selected actor {} at 0x{:X} ({:.1f}m away)",
                  hijacked_slot_, hijacked_entity_, std::sqrt(nearest_distance_sq));
     return true;
 }
 
 void CompanionHijack::deactivate() {
+    hooks::set_companion_position_probe_target(0);
     if (active_) {
         spdlog::info("CompanionHijack: released companion slot {}", hijacked_slot_);
     }

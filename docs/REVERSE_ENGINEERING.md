@@ -165,7 +165,7 @@ See `include/cdcoop/core/game_structures.h` namespace `signatures` for all 40+ p
 
 | Hook | Signature | Purpose |
 |------|-----------|---------|
-| PositionAccess | Disabled | AOB is a mid-function register site; position broadcasting now polls the verified pointer chain |
+| CompanionPositionProbe (opt-in, diagnostic mid-hook) | `POSITION_PRIMARY` / `POSITION_FALLBACK` | Counts final `movups [r13],xmm0` hits and exact matches against selected companion TransformSync `+0x63C`; gated on `diagnose_companion_position_write`. The detour does not modify saved context or game-state data |
 | DamageSlot | Disabled | Previous inline detour used a function ABI at a mid-function register site |
 | StatWrite | Disabled | Not required for the player-state polling path; previous inline detour was unsafe |
 | CameraZoomFOV | Disabled | Must be rebuilt as a register-correct mid hook before use |

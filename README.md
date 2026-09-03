@@ -200,6 +200,7 @@ Edit `cdcoop_config.json` in the game directory. The file is auto-created with d
     "log_level": 2,
 
     "enable_experimental_hooks": false,
+    "diagnose_companion_position_write": false,
     "dump_world_system_probe": false,
 
     "toggle_overlay_key": 119,
@@ -227,6 +228,7 @@ Edit `cdcoop_config.json` in the game directory. The file is auto-created with d
 | `log_packets` | `false` | Log network packets to cdcoop.log |
 | `log_level` | `2` | 0=trace, 1=debug, 2=info, 3=warn, 4=error |
 | `enable_experimental_hooks` | `false` | Install CDAnimCancel animation-evaluator hook and dragon HP probe. Disable if mod becomes unstable after a game patch |
+| `diagnose_companion_position_write` | `false` | Install a diagnostic mid-hook at the authoritative position store and log whether it runs for the selected companion. The detour does not change saved registers or game-state data |
 | `dump_world_system_probe` | `false` | Walk WorldSystem sibling pointers once after resolve and log their vtable RVAs to `cdcoop_world_probe.log`. Safe, read-only telemetry |
 | `toggle_overlay_key` | `119` | F8 keycode |
 | `open_session_key` | `118` | F7 keycode |

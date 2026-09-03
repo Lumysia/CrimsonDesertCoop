@@ -1,4 +1,5 @@
 #include <cdcoop/player/player_manager.h>
+#include <cdcoop/core/config.h>
 #include <cdcoop/core/hooks.h>
 #include <cdcoop/core/game_structures.h>
 #include <cdcoop/player/companion_hijack.h>
@@ -42,6 +43,8 @@ void PlayerManager::shutdown() {
 void PlayerManager::update(float delta_time) {
     if (HookManager::instance().status().unsupported_build) return;
 
+    const auto& cfg = get_config();
+
     if (local_player_ != 0) {
         const auto& rt = get_runtime_offsets();
         bool actor_chain_changed = false;
@@ -83,7 +86,9 @@ void PlayerManager::update(float delta_time) {
         local_resolve_retry_timer_ = 0.0f;
     }
 
-    if (Session::instance().is_active() && !is_remote_spawned()) {
+    const bool should_select_companion = Session::instance().is_active() ||
+                                         cfg.diagnose_companion_position_write;
+    if (should_select_companion && !is_remote_spawned()) {
         remote_spawn_retry_timer_ += delta_time;
         if (remote_spawn_retry_timer_ >= 1.0f) {
             remote_spawn_retry_timer_ = 0.0f;
@@ -91,6 +96,16 @@ void PlayerManager::update(float delta_time) {
         }
     } else {
         remote_spawn_retry_timer_ = 0.0f;
+    }
+
+    if (cfg.diagnose_companion_position_write) {
+        companion_probe_log_timer_ += delta_time;
+        if (companion_probe_log_timer_ >= 1.0f) {
+            companion_probe_log_timer_ = 0.0f;
+            hooks::log_companion_position_probe();
+        }
+    } else {
+        companion_probe_log_timer_ = 0.0f;
     }
 }
 

@@ -40,6 +40,7 @@ private:
     uintptr_t game_instance_ = 0;
     float local_resolve_retry_timer_ = 0.0f;
     float remote_spawn_retry_timer_ = 0.0f;
+    float companion_probe_log_timer_ = 0.0f;
 };
 
 } // namespace cdcoop

@@ -118,11 +118,13 @@ private:
 // Game function hooks - these are the specific hooks we install
 namespace hooks {
 
-// Player position write hook
-// Signature will need to be found via reverse engineering
-// Placeholder pattern based on typical position update functions
-inline SafetyHookInline player_position_hook;
-void __cdecl player_position_detour(void* player, float x, float y, float z);
+// Read-only diagnostic at the authoritative position store. The detour only
+// compares r13 with an atomically published companion TransformSync address;
+// it never changes registers or game memory.
+inline SafetyHookMid companion_position_probe_hook;
+void companion_position_probe_detour(SafetyHookContext& ctx);
+void set_companion_position_probe_target(uintptr_t target) noexcept;
+void log_companion_position_probe();
 
 // Player animation state hook
 inline SafetyHookInline player_animation_hook;

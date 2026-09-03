@@ -16,10 +16,20 @@
 #include <Windows.h>
 
 #include <atomic>
+#include <cstring>
 
 namespace cdcoop {
 
 namespace {
+static_assert(std::atomic<uint64_t>::is_always_lock_free);
+static_assert(std::atomic<uintptr_t>::is_always_lock_free);
+
+std::atomic<uint64_t> companion_position_probe_hits{0};
+std::atomic<uint64_t> companion_position_probe_matches{0};
+std::atomic<uintptr_t> companion_position_probe_target{0};
+std::atomic<uintptr_t> companion_position_probe_last_r13{0};
+std::atomic<uintptr_t> companion_position_probe_last_rbx{0};
+
 // Dedicated logger for world-system probe telemetry. Created lazily on
 // first call to scan_world_system_siblings() so we don't spawn the file
 // when the probe is disabled.
@@ -143,6 +153,44 @@ bool HookManager::initialize() {
     // HP dynamic scan are both third-party research that has not been
     // verified against this specific build.
     auto& cfg = get_config();
+    if (cfg.diagnose_companion_position_write) {
+        auto position_sig = sig_scan(signatures::POSITION_PRIMARY,
+                                     "CompanionPositionProbe");
+        uintptr_t target = position_sig
+            ? position_sig.address + signatures::POSITION_PRIMARY_OFFSET
+            : 0;
+        if (!position_sig) {
+            position_sig = sig_scan(signatures::POSITION_FALLBACK,
+                                    "CompanionPositionProbeFallback");
+            if (position_sig) {
+                target = position_sig.address + signatures::POSITION_FALLBACK_OFFSET;
+            }
+        }
+
+        constexpr uint8_t kExpectedPositionWrite[] = {
+            0x0F, 0x28, 0xC6, 0xF3, 0x45, 0x0F, 0x5C, 0xC8,
+            0x41, 0x0F, 0x58, 0x45, 0x00,
+            0x41, 0x0F, 0x11, 0x45, 0x00,
+        };
+        const bool target_in_module = target >= game_base_ + 13 &&
+                                      target <= game_base_ + game_size_ - 5;
+        const bool bytes_match = target_in_module &&
+            is_readable(target - 13, sizeof(kExpectedPositionWrite)) &&
+            std::memcmp(reinterpret_cast<const void*>(target - 13),
+                        kExpectedPositionWrite, sizeof(kExpectedPositionWrite)) == 0;
+        if (position_sig && bytes_match &&
+            create_mid_hook(target, hooks::companion_position_probe_detour,
+                            hooks::companion_position_probe_hook)) {
+            spdlog::info("Installed read-only CompanionPositionProbe at 0x{:X}", target);
+            status_.installed++;
+            status_.installed_names.emplace_back("CompanionPositionProbe (read-only mid)");
+        } else {
+            spdlog::warn("Failed to install CompanionPositionProbe (signature/bytes mismatch)");
+            status_.failed++;
+            status_.failed_names.emplace_back("CompanionPositionProbe");
+        }
+    }
+
     if (cfg.enable_experimental_hooks) {
         spdlog::info("Experimental hooks enabled (config.enable_experimental_hooks = true)");
 
@@ -231,7 +279,7 @@ void HookManager::shutdown() {
     if (!initialized_) return;
 
     // SafetyHook automatically restores original code when hooks are destroyed
-    hooks::player_position_hook = {};
+    hooks::companion_position_probe_hook = {};
     hooks::player_animation_hook = {};
     hooks::damage_calc_hook = {};
     hooks::companion_spawn_hook = {};
@@ -628,19 +676,37 @@ bool HookManager::resolve_child_actor_vtbl() {
 
 namespace hooks {
 
-void __cdecl player_position_detour(void* player, float x, float y, float z) {
-    // Call original
-    player_position_hook.call<void>(player, x, y, z);
+void companion_position_probe_detour(SafetyHookContext& ctx) {
+    companion_position_probe_hits.fetch_add(1, std::memory_order_relaxed);
+    companion_position_probe_last_r13.store(ctx.r13, std::memory_order_relaxed);
+    companion_position_probe_last_rbx.store(ctx.rbx, std::memory_order_relaxed);
 
-    // The POSITION_PRIMARY/FALLBACK AOBs hit a mid-function position
-    // write — (x, y, z) are not reliable data at a mid-function site.
-    // The only purpose of this detour now is to confirm "game is writing
-    // player position" so the debug overlay can show TRACKING vs WAITING.
-    // Actual broadcast is driven by PlayerSync::update() at 30Hz using
-    // the same verified pointer chain, which avoids the ~2x duplicate-
-    // send rate we had when this detour also broadcast.
-    (void)player; (void)x; (void)y; (void)z;
-    get_runtime_offsets().position_resolved = true;
+    const uintptr_t target = companion_position_probe_target.load(
+        std::memory_order_acquire);
+    if (target != 0 && ctx.r13 == target) {
+        companion_position_probe_matches.fetch_add(1, std::memory_order_relaxed);
+    }
+}
+
+void set_companion_position_probe_target(uintptr_t target) noexcept {
+    companion_position_probe_target.store(target, std::memory_order_release);
+}
+
+void log_companion_position_probe() {
+    // Cumulative loads avoid splitting one hit/match pair across reset windows.
+    // Load matches first: every match increments hits first, so hits >= matches.
+    const uint64_t matches = companion_position_probe_matches.load(
+        std::memory_order_relaxed);
+    const uint64_t hits = companion_position_probe_hits.load(std::memory_order_relaxed);
+    const uintptr_t target = companion_position_probe_target.load(
+        std::memory_order_acquire);
+    const uintptr_t last_r13 = companion_position_probe_last_r13.load(
+        std::memory_order_relaxed);
+    const uintptr_t last_rbx = companion_position_probe_last_rbx.load(
+        std::memory_order_relaxed);
+    spdlog::info("CompanionPositionProbe: cumulative_hits={} selected_matches={} target=0x{:X} "
+                 "last_r13=0x{:X} last_rbx=0x{:X}",
+                 hits, matches, target, last_r13, last_rbx);
 }
 
 void __cdecl player_animation_detour(void* player, uint32_t anim_id, float blend) {

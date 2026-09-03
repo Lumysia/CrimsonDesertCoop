@@ -40,6 +40,9 @@ struct Config {
     // The current DX12 renderer cannot yet capture the game's command queue.
     // Keep GPU overlay injection opt-in; Present is still hooked for ticking.
     bool enable_experimental_overlay = false;
+    // Install a read-only mid-hook that counts authoritative position writes
+    // and reports whether they target the selected companion TransformSync.
+    bool diagnose_companion_position_write = false;
     // When true, after WorldSystem resolves, scan its sibling pointers and
     // log their vtable RVAs to cdcoop_world_probe.log to help the community
     // identify the quest / cutscene / world-object managers.
@@ -61,7 +64,8 @@ struct Config {
         player2_model_id, player2_use_companion_slot,
         debug_overlay, log_packets, log_level,
         enable_experimental_hooks,
-        enable_experimental_overlay, dump_world_system_probe,
+        enable_experimental_overlay, diagnose_companion_position_write,
+        dump_world_system_probe,
         toggle_overlay_key, open_session_key
     )
 };
