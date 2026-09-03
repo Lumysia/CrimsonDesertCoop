@@ -94,8 +94,11 @@ public:
 private:
     Session() = default;
 
-    void on_packet_received(PacketType type, const uint8_t* data, size_t size);
+    void on_packet_received(uint64_t generation, PacketType type,
+                            const uint8_t* data, size_t size);
     void handle_handshake(const uint8_t* data, size_t size);
+    void send_handshake();
+    bool enter_connected();
     void send_heartbeat();
 
     // shared_ptr + brief mutex on every read so that leave_session()
@@ -122,7 +125,7 @@ private:
     // transitions (F7 hotkey + Steam invite arriving at the same moment)
     // would both pass the DISCONNECTED check and race on transport_
     // reset, which is UB. Lock scope is the whole transition.
-    std::mutex transition_mutex_;
+    std::recursive_mutex transition_mutex_;
 
     // Atomic so concurrent send() calls (tick thread, packet-handler
     // thread, hook detour threads) don't race on the post-increment.
@@ -130,10 +133,17 @@ private:
     // informational, not used for retransmit — but plain ++ on a
     // non-atomic uint32_t from multiple threads is UB.
     std::atomic<uint32_t> sequence_{0};
+    std::atomic<uint64_t> transport_generation_{0};
     float heartbeat_timer_ = 0.0f;
+    float handshake_timer_ = 0.0f;
+    float connect_timer_ = 0.0f;
     float ping_ms_ = 0.0f;
     float time_since_last_recv_ = 0.0f;
+    bool handshake_sent_ = false;
+    static constexpr uint32_t PROTOCOL_VERSION = 1;
     static constexpr float HEARTBEAT_INTERVAL = 1.0f;
+    static constexpr float HANDSHAKE_INTERVAL = 1.0f;
+    static constexpr float CONNECT_TIMEOUT_SECONDS = 15.0f;
     static constexpr float TIMEOUT_SECONDS = 10.0f;
 };
 

@@ -38,7 +38,11 @@ bool Overlay::initialize() {
 
     present_hook_addr_ = 1; // Mark as hooked (actual addr is internal to dx12_hook)
     initialized_ = true;
-    spdlog::info("Overlay: DX12 Present hook installed, ImGui will init on first frame");
+    if (get_config().enable_experimental_overlay) {
+        spdlog::warn("Overlay: experimental DX12 rendering enabled");
+    } else {
+        spdlog::info("Overlay: GPU rendering disabled; Present hook is tick-only");
+    }
     return true;
 }
 
@@ -64,6 +68,10 @@ void Overlay::render() {
 }
 
 void Overlay::toggle_visible() {
+    if (!get_config().enable_experimental_overlay) {
+        spdlog::warn("Overlay rendering is disabled. Set enable_experimental_overlay=true to opt in.");
+        return;
+    }
     visible_ = !visible_;
     spdlog::info("Overlay: {}", visible_ ? "shown" : "hidden");
 }
@@ -81,7 +89,7 @@ void Overlay::render_session_panel() {
                 session.host_session();
             }
             static char join_target[128] = "";
-            ImGui::InputText("Steam ID / IP", join_target, sizeof(join_target));
+            ImGui::InputText("Steam ID", join_target, sizeof(join_target));
             if (ImGui::Button("Join Session")) {
                 session.join_session(join_target);
             }
@@ -220,6 +228,12 @@ void Overlay::render_debug_panel() {
     // --- Hook installation telemetry ---
     ImGui::Separator();
     const auto& hs = HookManager::instance().status();
+    if (hs.unsupported_build) {
+        ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f),
+                           "Unsupported game version: signatures failed to match.");
+        ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f),
+                           "Co-op is disabled until the mod is updated for this patch.");
+    }
     ImGui::Text("Hooks: %d installed, %d failed", hs.installed, hs.failed);
     if (!hs.failed_names.empty()) {
         if (ImGui::TreeNode("Failed hooks")) {

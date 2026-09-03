@@ -13,12 +13,8 @@
 #include <cdcoop/core/memory.h>
 #include <cdcoop/network/session.h>
 #include <cdcoop/network/steam_network.h>
-#include <cdcoop/sync/player_sync.h>
-#include <cdcoop/sync/enemy_sync.h>
-#include <cdcoop/sync/world_sync.h>
 #include <cdcoop/sync/mount_sync.h>
 #include <cdcoop/player/companion_hijack.h>
-#include <cdcoop/player/player_manager.h>
 #include <cdcoop/sync/animation_sync.h>
 #include <cdcoop/ui/overlay.h>
 
@@ -101,8 +97,13 @@ void input_poll_loop() {
         if (host_now && !host_prev) {
             auto& session = cdcoop::Session::instance();
             if (session.state() == cdcoop::SessionState::DISCONNECTED) {
-                spdlog::info("Host hotkey: starting session");
-                session.host_session();
+                if (cfg.join_steam_id.empty()) {
+                    spdlog::info("Session hotkey: starting host");
+                    session.host_session();
+                } else {
+                    spdlog::info("Session hotkey: joining configured Steam peer");
+                    session.join_session(cfg.join_steam_id);
+                }
             } else {
                 spdlog::info("Host hotkey: session already active (state {})",
                              static_cast<int>(session.state()));
@@ -143,14 +144,8 @@ void fallback_tick_loop() {
         if (dt > 0.1f) dt = 0.1f; // clamp to match Present-path behavior
 
         auto& session = cdcoop::Session::instance();
-        if (session.is_active()) {
-            session.update(dt);
-            cdcoop::PlayerSync::instance().update(dt);
-            cdcoop::EnemySync::instance().update(dt);
-            cdcoop::WorldSync::instance().update(dt);
-        }
+        session.update(dt);
         cdcoop::MountSync::instance().update(dt);
-        cdcoop::PlayerManager::instance().update(dt);
 
         Sleep(16);
     }
@@ -283,7 +278,7 @@ void mod_main() {
 
         spdlog::info("CrimsonDesertCoop fully initialized!");
         spdlog::info("  Overlay: {}", overlay_ok ? "ON (F8 toggles)" : "OFF (Present hook failed)");
-        spdlog::info("  F7 = host session, F8 = toggle overlay");
+        spdlog::info("  F7 = host/join configured session, F8 = toggle overlay");
         spdlog::info("Waiting for session...");
         append_marker(overlay_ok
             ? "fully initialized — overlay ON, F7 to host / F8 to toggle"

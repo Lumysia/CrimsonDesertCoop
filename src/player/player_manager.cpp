@@ -2,7 +2,9 @@
 #include <cdcoop/core/hooks.h>
 #include <cdcoop/core/game_structures.h>
 #include <cdcoop/player/companion_hijack.h>
+#include <cdcoop/network/session.h>
 #include <spdlog/spdlog.h>
+#include <cmath>
 
 namespace cdcoop {
 
@@ -37,10 +39,32 @@ void PlayerManager::shutdown() {
     game_instance_ = 0;
 }
 
-void PlayerManager::update([[maybe_unused]] float delta_time) {
+void PlayerManager::update(float delta_time) {
+    if (HookManager::instance().status().unsupported_build) return;
+
+    if (local_player_ != 0 && !is_readable(local_player_, sizeof(uintptr_t))) {
+        invalidate_local_player();
+    }
+
     // Re-acquire player pointer if lost (e.g., after loading screen)
     if (local_player_ == 0) {
-        find_local_player();
+        local_resolve_retry_timer_ += delta_time;
+        if (local_resolve_retry_timer_ >= 1.0f) {
+            local_resolve_retry_timer_ = 0.0f;
+            find_local_player();
+        }
+    } else {
+        local_resolve_retry_timer_ = 0.0f;
+    }
+
+    if (Session::instance().is_active() && !is_remote_spawned()) {
+        remote_spawn_retry_timer_ += delta_time;
+        if (remote_spawn_retry_timer_ >= 1.0f) {
+            remote_spawn_retry_timer_ = 0.0f;
+            spawn_remote_player();
+        }
+    } else {
+        remote_spawn_retry_timer_ = 0.0f;
     }
 }
 
@@ -68,12 +92,7 @@ Vec3 PlayerManager::local_position() const {
         }
     }
 
-    // Fallback: read directly from actor base (from position hook r13)
-    return {
-        read_mem<float>(local_player_, offsets::Player::POSITION_X),
-        read_mem<float>(local_player_, offsets::Player::POSITION_Y),
-        read_mem<float>(local_player_, offsets::Player::POSITION_Z)
-    };
+    return {0, 0, 0};
 }
 
 Quat PlayerManager::local_rotation() const {
@@ -115,6 +134,62 @@ float PlayerManager::local_max_health() const {
     return 0;
 }
 
+bool PlayerManager::read_local_state(Vec3& position, Quat& rotation,
+                                     float& health, float& max_health) {
+    if (!is_valid_ptr(local_player_)) return false;
+
+    uintptr_t core = resolve_ptr_chain(local_player_, {
+        offsets::Player::ACTOR_TO_INNER,
+        offsets::Player::INNER_TO_CORE
+    });
+    uintptr_t pos_struct = resolve_ptr_chain(core, {
+        offsets::Player::POS_OWNER_TO_STRUCT
+    });
+    uintptr_t stat_base = resolve_ptr_chain(local_player_, {
+        offsets::Player::STAT_COMPONENT
+    });
+    if (!is_valid_ptr(pos_struct) || !is_valid_ptr(stat_base)) {
+        invalidate_local_player();
+        return false;
+    }
+
+    position = {
+        read_mem<float>(pos_struct, offsets::Player::POS_STRUCT_X),
+        read_mem<float>(pos_struct, offsets::Player::POS_STRUCT_Y),
+        read_mem<float>(pos_struct, offsets::Player::POS_STRUCT_Z)
+    };
+    rotation = read_mem<Quat>(pos_struct, offsets::Player::ROTATION_QUAT);
+    int64_t raw_health = read_mem<int64_t>(stat_base, StatEntry::CURRENT_VALUE);
+    int64_t raw_max_health = read_mem<int64_t>(stat_base, StatEntry::MAX_VALUE);
+
+    constexpr float kMaxCoordinate = 10'000'000.0f;
+    constexpr int64_t kMaxRawHealth = 10'000'000'000LL;
+    const float quat_len_sq = rotation.x * rotation.x + rotation.y * rotation.y +
+                              rotation.z * rotation.z + rotation.w * rotation.w;
+    bool valid = std::isfinite(position.x) && std::isfinite(position.y) &&
+                 std::isfinite(position.z) &&
+                 std::abs(position.x) <= kMaxCoordinate &&
+                 std::abs(position.y) <= kMaxCoordinate &&
+                 std::abs(position.z) <= kMaxCoordinate &&
+                 std::isfinite(quat_len_sq) && quat_len_sq >= 0.25f &&
+                 quat_len_sq <= 4.0f && raw_health >= 0 && raw_max_health > 0 &&
+                 raw_health <= kMaxRawHealth && raw_max_health <= kMaxRawHealth;
+    if (!valid) {
+        invalidate_local_player();
+        return false;
+    }
+
+    const float inv_len = 1.0f / std::sqrt(quat_len_sq);
+    rotation.x *= inv_len;
+    rotation.y *= inv_len;
+    rotation.z *= inv_len;
+    rotation.w *= inv_len;
+    health = static_cast<float>(raw_health) / 1000.0f;
+    max_health = static_cast<float>(raw_max_health) / 1000.0f;
+    get_runtime_offsets().position_resolved = true;
+    return true;
+}
+
 uintptr_t PlayerManager::remote_player() const {
     return CompanionHijack::instance().get_entity_ptr();
 }
@@ -136,6 +211,7 @@ void PlayerManager::spawn_remote_player() {
 
 void PlayerManager::despawn_remote_player() {
     CompanionHijack::instance().deactivate();
+    remote_spawn_retry_timer_ = 0.0f;
     spdlog::info("Remote player despawned");
 }
 
@@ -164,9 +240,22 @@ void PlayerManager::find_local_player() {
         return;
     }
 
-    // Method 2: Try resolving the chain ourselves if WorldSystem is known
+    // Method 2: Re-resolve WorldSystem. A supported signature can match while
+    // its singleton is still null on the main menu, then become valid later.
+    auto& hooks = HookManager::instance();
+    if (!rt.world_system_resolved) {
+        hooks.resolve_world_system();
+        if (rt.player_resolved && is_valid_ptr(rt.player_actor_ptr)) {
+            local_player_ = rt.player_actor_ptr;
+            game_instance_ = rt.world_system_ptr;
+            spdlog::info("PlayerManager: resolved player after world load at 0x{:X}",
+                         local_player_);
+            return;
+        }
+    }
+
+    // Method 3: Try resolving the chain ourselves if WorldSystem is known
     if (rt.world_system_resolved && is_valid_ptr(rt.world_system_ptr)) {
-        auto& hooks = HookManager::instance();
         if (hooks.resolve_player_actor()) {
             local_player_ = rt.player_actor_ptr;
             game_instance_ = rt.world_system_ptr;
@@ -175,22 +264,28 @@ void PlayerManager::find_local_player() {
         }
     }
 
-    // Method 3: Try the PlayerPointerCapture signature directly
-    // This scans for the function that accesses the player pointer
-    auto& hooks = HookManager::instance();
-    auto result = hooks.sig_scan(signatures::PLAYER_PTR_PRIMARY, "PlayerPointerCapture");
-    if (!result) {
-        result = hooks.sig_scan(signatures::PLAYER_PTR_FALLBACK, "PlayerPointerCapture_FB");
+    // Method 4: Retry the independent PlayerBase signature/static chain.
+    if (hooks.resolve_player_base() && rt.player_resolved && is_valid_ptr(rt.player_actor_ptr)) {
+        local_player_ = rt.player_actor_ptr;
+        game_instance_ = rt.world_system_ptr;
+        spdlog::info("PlayerManager: resolved player via PlayerBase at 0x{:X}", local_player_);
+        return;
     }
 
-    if (result) {
-        spdlog::info("PlayerManager: found PlayerPointerCapture function at 0x{:X}", result.address);
-        spdlog::info("PlayerManager: player pointer will be captured at runtime via hook");
-        // The actual pointer capture happens in the hook callback
-    } else {
-        spdlog::warn("PlayerManager: all player finding methods failed");
-        spdlog::warn("PlayerManager: player pointer will be unavailable until resolved");
-    }
+    spdlog::debug("PlayerManager: player not available yet");
+}
+
+void PlayerManager::invalidate_local_player() {
+    CompanionHijack::instance().deactivate();
+    local_player_ = 0;
+    game_instance_ = 0;
+    local_resolve_retry_timer_ = 0.0f;
+
+    auto& rt = get_runtime_offsets();
+    rt.player_actor_ptr = 0;
+    rt.player_stats_component = 0;
+    rt.player_resolved = false;
+    rt.position_resolved = false;
 }
 
 } // namespace cdcoop

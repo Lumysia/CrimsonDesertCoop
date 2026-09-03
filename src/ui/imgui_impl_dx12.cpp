@@ -9,12 +9,9 @@
 #include <cdcoop/ui/overlay.h>
 #include <cdcoop/core/hooks.h>
 #include <cdcoop/core/game_structures.h>
+#include <cdcoop/core/config.h>
 #include <cdcoop/network/session.h>
-#include <cdcoop/sync/player_sync.h>
-#include <cdcoop/sync/enemy_sync.h>
-#include <cdcoop/sync/world_sync.h>
 #include <cdcoop/sync/mount_sync.h>
-#include <cdcoop/player/player_manager.h>
 #include <spdlog/spdlog.h>
 
 #include <Windows.h>
@@ -64,6 +61,24 @@ static UINT back_buffer_count = 0;
 static ID3D12CommandQueue* imgui_cmd_queue = nullptr;
 static LARGE_INTEGER perf_freq = {};
 static LARGE_INTEGER last_frame_time = {};
+
+static void run_coop_update() {
+    if (perf_freq.QuadPart == 0) {
+        QueryPerformanceFrequency(&perf_freq);
+        QueryPerformanceCounter(&last_frame_time);
+    }
+
+    LARGE_INTEGER now{};
+    QueryPerformanceCounter(&now);
+    float delta_time = static_cast<float>(now.QuadPart - last_frame_time.QuadPart) /
+                       static_cast<float>(perf_freq.QuadPart);
+    last_frame_time = now;
+    if (delta_time > 0.1f) delta_time = 0.1f;
+
+    auto& session = Session::instance();
+    session.update(delta_time);
+    MountSync::instance().update(delta_time);
+}
 
 // WndProc hook for ImGui input handling
 static LRESULT CALLBACK wndproc_hook(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -186,10 +201,6 @@ static bool init_imgui(IDXGISwapChain* swap_chain) {
     original_wndproc = reinterpret_cast<WNDPROC>(
         SetWindowLongPtr(game_hwnd, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(wndproc_hook)));
 
-    // Init frame timing
-    QueryPerformanceFrequency(&perf_freq);
-    QueryPerformanceCounter(&last_frame_time);
-
     spdlog::info("DX12 Hook: ImGui initialized ({}x{}, {} buffers)",
                   sc_desc.BufferDesc.Width, sc_desc.BufferDesc.Height, back_buffer_count);
     return true;
@@ -197,6 +208,14 @@ static bool init_imgui(IDXGISwapChain* swap_chain) {
 
 // Present detour - this fires every frame
 static HRESULT __stdcall present_detour(IDXGISwapChain* swap_chain, UINT sync_interval, UINT flags) {
+    // Networking must progress while HOSTING/CONNECTING and must not depend on
+    // ImGui initialization succeeding.
+    run_coop_update();
+
+    if (!get_config().enable_experimental_overlay) {
+        return present_hook.stdcall<HRESULT>(swap_chain, sync_interval, flags);
+    }
+
     if (!imgui_initialized) {
         if (init_imgui(swap_chain)) {
             imgui_initialized = true;
@@ -209,38 +228,6 @@ static HRESULT __stdcall present_detour(IDXGISwapChain* swap_chain, UINT sync_in
         cleanup_render_targets();
         create_render_targets(swap_chain);
         need_resize = false;
-    }
-
-    // Calculate delta_time
-    LARGE_INTEGER now;
-    QueryPerformanceCounter(&now);
-    float delta_time = static_cast<float>(now.QuadPart - last_frame_time.QuadPart) /
-                       static_cast<float>(perf_freq.QuadPart);
-    last_frame_time = now;
-
-    // Clamp delta to avoid large jumps (e.g. during loading)
-    if (delta_time > 0.1f) delta_time = 0.1f;
-
-    // =====================================================================
-    // Co-op update loop - runs every frame via DX12 Present hook
-    // This is the main tick for all networking, sync, and input processing.
-    // =====================================================================
-    {
-        auto& session = cdcoop::Session::instance();
-        if (session.is_active()) {
-            session.update(delta_time);
-            cdcoop::PlayerSync::instance().update(delta_time);
-            cdcoop::EnemySync::instance().update(delta_time);
-            cdcoop::WorldSync::instance().update(delta_time);
-        }
-        // MountSync polls the local mount pointer even outside a session
-        // so the debug overlay can show local mount HP for verification.
-        cdcoop::MountSync::instance().update(delta_time);
-        cdcoop::PlayerManager::instance().update(delta_time);
-
-        // Hotkey handling lives in the dedicated input thread (see
-        // dllmain.cpp::input_poll_loop). That path runs even when this
-        // Present hook failed to install, so F7/F8 are never silent.
     }
 
     // Start ImGui frame

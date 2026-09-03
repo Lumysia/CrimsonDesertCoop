@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(CrimsonDesertCoop VERSION 0.2.3 LANGUAGES CXX)
+project(CrimsonDesertCoop VERSION 0.3.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -52,7 +52,7 @@ FetchContent_MakeAvailable(json)
 FetchContent_Declare(
     imgui
     GIT_REPOSITORY https://github.com/ocornut/imgui.git
-    GIT_TAG        v1.91.8
+    GIT_TAG        v1.91.9
 )
 FetchContent_MakeAvailable(imgui)
 

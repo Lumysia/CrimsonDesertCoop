@@ -23,6 +23,23 @@ bool is_finite_quat(const Quat& q) {
     return std::isfinite(q.x) && std::isfinite(q.y) &&
            std::isfinite(q.z) && std::isfinite(q.w);
 }
+
+bool is_sane_vec3(const Vec3& v, float limit) {
+    return is_finite_vec3(v) && std::abs(v.x) <= limit &&
+           std::abs(v.y) <= limit && std::abs(v.z) <= limit;
+}
+
+bool normalize_quat(Quat& q) {
+    if (!is_finite_quat(q)) return false;
+    float len_sq = q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w;
+    if (!std::isfinite(len_sq) || len_sq < 0.25f || len_sq > 4.0f) return false;
+    float inv_len = 1.0f / std::sqrt(len_sq);
+    q.x *= inv_len;
+    q.y *= inv_len;
+    q.z *= inv_len;
+    q.w *= inv_len;
+    return true;
+}
 } // namespace
 
 PlayerSync& PlayerSync::instance() {
@@ -55,12 +72,27 @@ void PlayerSync::initialize() {
 
     auto& cfg = get_config();
     tether_distance_sq_ = cfg.tether_distance * cfg.tether_distance;
+    reset_remote_state();
 
     spdlog::info("PlayerSync initialized (tether dist: {}m)", cfg.tether_distance);
 }
 
 void PlayerSync::shutdown() {
-    // Nothing to clean up
+    reset_remote_state();
+}
+
+void PlayerSync::reset_remote_state() {
+    memset(state_buffer_, 0, sizeof(state_buffer_));
+    state_buffer_head_ = 0;
+    state_buffer_count_ = 0;
+    interpolated_state_ = {};
+    interpolation_time_ = 0.0f;
+    has_remote_pose_ = false;
+    has_remote_health_ = false;
+    has_remote_animation_ = false;
+    tether_active_ = false;
+    send_timer_ = 0.0f;
+    full_state_timer_ = 0.0f;
 }
 
 void PlayerSync::update(float delta_time) {
@@ -74,14 +106,20 @@ void PlayerSync::update(float delta_time) {
     // to {0,0,0} every frame until the world finishes loading.
     if (pm.local_player() == 0) return;
 
+    Vec3 local_pos{};
+    Quat local_rot{};
+    float local_health = 0.0f;
+    float local_max_health = 0.0f;
+    if (!pm.read_local_state(local_pos, local_rot, local_health, local_max_health)) {
+        return;
+    }
+
     // Send our position at fixed rate
     send_timer_ += delta_time;
     if (send_timer_ >= POSITION_SEND_RATE) {
         send_timer_ = 0.0f;
 
-        Vec3 pos = pm.local_position();
-        Quat rot = pm.local_rotation();
-        on_local_position_changed(pos, rot, {0, 0, 0}, 0);
+        on_local_position_changed(local_pos, local_rot, {0, 0, 0}, 0);
     }
 
     // Send full state periodically as a fallback sync mechanism
@@ -89,21 +127,14 @@ void PlayerSync::update(float delta_time) {
     if (full_state_timer_ >= FULL_STATE_RATE) {
         full_state_timer_ = 0.0f;
 
-        auto& rt = get_runtime_offsets();
         PlayerFullStatePacket pkt{};
         pkt.header.type = PacketType::PLAYER_FULL_STATE;
         pkt.header.payload_size = sizeof(pkt) - sizeof(PacketHeader);
-        pkt.position = pm.local_position();
-        pkt.rotation = pm.local_rotation();
-        pkt.health = pm.local_health();
-        pkt.max_health = pm.local_max_health();
+        pkt.position = local_pos;
+        pkt.rotation = local_rot;
+        pkt.health = local_health;
+        pkt.max_health = local_max_health;
         pkt.movement_flags = 0;
-
-        // Read current animation state from player actor memory
-        if (is_valid_ptr(rt.player_actor_ptr)) {
-            pkt.animation_id = read_mem<uint32_t>(rt.player_actor_ptr, offsets::Player::ANIM_STATE);
-            pkt.anim_blend = read_mem<float>(rt.player_actor_ptr, offsets::Player::ANIM_BLEND);
-        }
 
         session.send_packet(pkt);
     }
@@ -114,17 +145,21 @@ void PlayerSync::update(float delta_time) {
     // Apply interpolated state to the companion entity
     auto& hijack = CompanionHijack::instance();
     if (hijack.is_active()) {
-        hijack.set_position(interpolated_state_.position, interpolated_state_.rotation);
-        hijack.set_animation(interpolated_state_.animation_id, interpolated_state_.anim_blend,
-                             1.0f, 0.0f);
-        hijack.set_health(interpolated_state_.health, interpolated_state_.max_health);
+        if (has_remote_pose_) {
+            hijack.set_position(interpolated_state_.position, interpolated_state_.rotation);
+        }
+        if (has_remote_health_) {
+            hijack.set_health(interpolated_state_.health, interpolated_state_.max_health);
+        }
     }
 
     // Tether check
-    Vec3 local_pos = pm.local_position();
-    Vec3 diff = interpolated_state_.position - local_pos;
-    float dist_sq = diff.length_sq();
-    tether_active_ = (dist_sq > tether_distance_sq_);
+    if (has_remote_pose_) {
+        Vec3 diff = interpolated_state_.position - local_pos;
+        tether_active_ = diff.length_sq() > tether_distance_sq_;
+    } else {
+        tether_active_ = false;
+    }
 }
 
 void PlayerSync::on_local_position_changed(const Vec3& pos, const Quat& rot,
@@ -184,18 +219,25 @@ void PlayerSync::on_remote_position(const uint8_t* data, size_t size) {
     auto* pkt = reinterpret_cast<const PlayerPositionPacket*>(data);
 
     // Drop anything non-finite before it reaches the interpolator.
-    if (!is_finite_vec3(pkt->position) || !is_finite_quat(pkt->rotation) ||
-        !is_finite_vec3(pkt->velocity)) {
-        spdlog::warn("Dropping non-finite remote position packet");
+    Quat rotation = pkt->rotation;
+    if (!is_sane_vec3(pkt->position, 10'000'000.0f) ||
+        !is_sane_vec3(pkt->velocity, 100'000.0f) || !normalize_quat(rotation)) {
+        spdlog::warn("Dropping invalid remote position packet");
         return;
     }
 
     // Add to interpolation buffer
     auto& slot = state_buffer_[state_buffer_head_];
     slot.position = pkt->position;
-    slot.rotation = pkt->rotation;
+    slot.rotation = rotation;
     slot.velocity = pkt->velocity;
     slot.movement_flags = pkt->movement_flags;
+
+    if (!has_remote_pose_) {
+        interpolated_state_.position = pkt->position;
+        interpolated_state_.rotation = rotation;
+        has_remote_pose_ = true;
+    }
 
     state_buffer_head_ = (state_buffer_head_ + 1) % STATE_BUFFER_SIZE;
     if (state_buffer_count_ < STATE_BUFFER_SIZE) state_buffer_count_++;
@@ -205,8 +247,10 @@ void PlayerSync::on_remote_animation(const uint8_t* data, size_t size) {
     if (size < sizeof(PlayerAnimationPacket)) return;
     auto* pkt = reinterpret_cast<const PlayerAnimationPacket*>(data);
 
+    if (!std::isfinite(pkt->blend_weight)) return;
     interpolated_state_.animation_id = pkt->animation_id;
     interpolated_state_.anim_blend = pkt->blend_weight;
+    has_remote_animation_ = true;
 }
 
 void PlayerSync::on_remote_combat(const uint8_t* data, size_t size) {
@@ -215,17 +259,8 @@ void PlayerSync::on_remote_combat(const uint8_t* data, size_t size) {
 
     spdlog::debug("Remote combat action: type={}, skill={}", pkt->action, pkt->skill_id);
 
-    // Mirror the remote player's last known animation on the companion entity.
-    // This avoids needing real combat animation IDs - we just replay whatever
-    // anim the remote player was performing when the combat packet was sent.
-    auto& hijack = CompanionHijack::instance();
-    if (hijack.is_active()) {
-        hijack.set_animation(interpolated_state_.animation_id, interpolated_state_.anim_blend,
-                             1.0f, 0.0f);
-    }
-
-    // Damage is handled by the damage_calc_detour hook when the companion entity
-    // attacks an enemy. No need to send a redundant 0-damage report here.
+    // Applying actor+0x120/+0x124 is intentionally disabled: those fields are
+    // unverified and the actual animation state lives in evaluator objects.
 }
 
 void PlayerSync::on_remote_full_state(const uint8_t* data, size_t size) {
@@ -235,18 +270,35 @@ void PlayerSync::on_remote_full_state(const uint8_t* data, size_t size) {
     // Same finite-check as on_remote_position; full-state packets write
     // into the same interpolation buffer so the same NaN-poisoning
     // hazard exists here.
-    if (!is_finite_vec3(pkt->position) || !is_finite_quat(pkt->rotation) ||
-        !is_finite_vec3(pkt->velocity) ||
-        !std::isfinite(pkt->health) || !std::isfinite(pkt->max_health)) {
-        spdlog::warn("Dropping non-finite remote full-state packet");
+    Quat rotation = pkt->rotation;
+    if (!is_sane_vec3(pkt->position, 10'000'000.0f) ||
+        !is_sane_vec3(pkt->velocity, 100'000.0f) || !normalize_quat(rotation) ||
+        !std::isfinite(pkt->health) || !std::isfinite(pkt->max_health) ||
+        !std::isfinite(pkt->stamina) || !std::isfinite(pkt->anim_blend) ||
+        pkt->health < 0.0f || pkt->max_health <= 0.0f ||
+        pkt->health > pkt->max_health * 2.0f || pkt->max_health > 10'000'000.0f) {
+        spdlog::warn("Dropping invalid remote full-state packet");
         return;
     }
 
     // Full state overwrites interpolation buffer
     auto& slot = state_buffer_[state_buffer_head_];
     memcpy(&slot, pkt, sizeof(PlayerFullStatePacket));
+    slot.rotation = rotation;
     state_buffer_head_ = (state_buffer_head_ + 1) % STATE_BUFFER_SIZE;
     if (state_buffer_count_ < STATE_BUFFER_SIZE) state_buffer_count_++;
+
+    if (!has_remote_pose_) {
+        interpolated_state_.position = pkt->position;
+        interpolated_state_.rotation = rotation;
+        has_remote_pose_ = true;
+    }
+    interpolated_state_.health = pkt->health;
+    interpolated_state_.max_health = pkt->max_health;
+    interpolated_state_.animation_id = pkt->animation_id;
+    interpolated_state_.anim_blend = pkt->anim_blend;
+    has_remote_health_ = true;
+    has_remote_animation_ = true;
 }
 
 void PlayerSync::interpolate_remote_state(float delta_time) {
@@ -281,8 +333,6 @@ void PlayerSync::interpolate_remote_state(float delta_time) {
         cur.x *= inv; cur.y *= inv; cur.z *= inv; cur.w *= inv;
     }
 
-    interpolated_state_.health = target.health;
-    interpolated_state_.max_health = target.max_health;
 }
 
 } // namespace cdcoop

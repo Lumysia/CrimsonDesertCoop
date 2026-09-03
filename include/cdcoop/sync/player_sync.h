@@ -14,6 +14,7 @@ public:
 
     void initialize();
     void shutdown();
+    void reset_remote_state();
 
     // Called every game tick
     void update(float delta_time);
@@ -49,6 +50,9 @@ private:
 
     PlayerFullStatePacket interpolated_state_ = {};
     float interpolation_time_ = 0.0f;
+    bool has_remote_pose_ = false;
+    bool has_remote_health_ = false;
+    bool has_remote_animation_ = false;
 
     // Tether
     bool tether_active_ = false;

@@ -145,10 +145,10 @@ See `include/cdcoop/core/game_structures.h` namespace `signatures` for all 40+ p
 
 | Hook | Signature | Purpose |
 |------|-----------|---------|
-| PositionAccess | `POSITION_PRIMARY` / `POSITION_FALLBACK` | Position broadcasting (r13 = float* position) |
-| DamageSlot | `DAMAGE_SLOT_PRIMARY` | Damage tracking (r15 = source, r12 = amount) |
-| StatWrite | `STAT_WRITE_PRIMARY` / `STAT_WRITE_FALLBACK` | Health/stamina/spirit interception |
-| CameraZoomFOV | `CAMERA_ZOOM_FOV` / `CAMERA_ZOOM_FOV_NONWILD` | Camera struct capture (r12+0xD8) |
+| PositionAccess | Disabled | AOB is a mid-function register site; position broadcasting now polls the verified pointer chain |
+| DamageSlot | Disabled | Previous inline detour used a function ABI at a mid-function register site |
+| StatWrite | Disabled | Not required for the player-state polling path; previous inline detour was unsafe |
+| CameraZoomFOV | Disabled | Must be rebuilt as a register-correct mid hook before use |
 | WorldSystem | `WORLD_SYSTEM_P1` / `P2` / `P3` | WorldSystem singleton resolution |
 | AnimationEvaluator (opt-in) | `ANIM_EVALUATOR` | rcx = evaluator this-pointer (function entry), gated on `enable_experimental_hooks` |
 | DragonHpProbe (opt-in, mid-hook) | `DRAGON_TIMER` | r13 = mount marker at the timer write site; dynamic HP scan, gated on `enable_experimental_hooks`. Converted from inline-hook to mid-hook because the AOB hits a mid-function `mov [r13+0x160]` write, not a function entry — the previous detour treated rcx as the marker which scanned unrelated memory |
@@ -420,5 +420,6 @@ Offsets WILL change with game patches. Maintain a version table:
 | 1.00.03     | Verified    | Verified  | Verified        | March 25 patch |
 | 1.01.03     | Verified    | Verified  | Verified        | March hotfix, legacy stat spacing |
 | May 2026 public tables | Unchanged in public sources | Verified via bbfox CT v29 | Unchanged in public sources | Stamina/spirit entry deltas moved to +0x510 / +0x5A0 from health entry |
+| July 4 2026 patch | Broken | Broken | Broken | Published core signatures no longer match. Version 0.3.0 fails closed until a new scan is verified. |
 
 Use the signature scanner to automatically find updated offsets after patches rather than hardcoding addresses.

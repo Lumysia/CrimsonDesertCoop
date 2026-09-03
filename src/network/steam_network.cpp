@@ -14,6 +14,7 @@
 #include <steam/isteamfriends.h>
 
 #include <memory>
+#include <mutex>
 #include <string>
 #include <atomic>
 
@@ -27,12 +28,22 @@ namespace cdcoop {
 // plain pointer read racing with dtor = null set was a latent use-
 // after-free.
 static std::atomic<SteamNetworkTransport*> g_active_transport{nullptr};
+static std::mutex g_active_transport_mutex;
 
 // Max lobby members for co-op. Host + 1 joiner = 2. Keep it small so the
 // invite dialog doesn't look like "start a party game" — this is 2-player.
 static constexpr int kCoopLobbyMaxMembers = 2;
+static constexpr uint16_t kDefaultVirtualPort = 0;
+
+static uint16_t normalize_virtual_port(uint16_t configured) {
+    if (configured < 1000) return configured;
+    spdlog::warn("Steam: configured port {} is a UDP-style port; using P2P virtual port 0",
+                 configured);
+    return kDefaultVirtualPort;
+}
 
 struct SteamNetworkTransport::Impl {
+    mutable std::mutex state_mutex;
     HSteamNetConnection connection = k_HSteamNetConnection_Invalid;
     HSteamListenSocket listen_socket = k_HSteamListenSocket_Invalid;
     ISteamNetworkingSockets* sockets = nullptr;
@@ -104,6 +115,7 @@ void SteamInviteListener::on_join_requested(GameLobbyJoinRequested_t* req) {
 // --- Callback handlers (defined out-of-line for readability) ---
 
 void SteamNetworkTransport::Impl::on_lobby_created(LobbyCreated_t* result, bool io_failure) {
+    std::lock_guard lock(state_mutex);
     lobby_pending = false;
     if (io_failure || result->m_eResult != k_EResultOK) {
         spdlog::warn("Steam: CreateLobby failed (io_failure={}, result={})",
@@ -129,6 +141,7 @@ void SteamNetworkTransport::Impl::on_lobby_created(LobbyCreated_t* result, bool 
 }
 
 void SteamNetworkTransport::Impl::on_lobby_entered(LobbyEnter_t* info) {
+    std::lock_guard lock(state_mutex);
     if (info->m_EChatRoomEnterResponse != k_EChatRoomEnterResponseSuccess) {
         spdlog::warn("Steam: LobbyEnter failed (response={})",
                      static_cast<int>(info->m_EChatRoomEnterResponse));
@@ -162,25 +175,35 @@ void on_connection_status_changed(SteamNetConnectionStatusChangedCallback_t* inf
     // Snapshot the transport pointer once so a concurrent dtor that
     // clears g_active_transport mid-callback can't null-deref us partway
     // through the switch below.
+    std::lock_guard active_lock(g_active_transport_mutex);
     SteamNetworkTransport* transport = g_active_transport.load(std::memory_order_acquire);
     if (!transport || !transport->impl_) return;
     auto* impl = transport->impl_.get();
+    std::lock_guard state_lock(impl->state_mutex);
 
     switch (info->m_info.m_eState) {
         case k_ESteamNetworkingConnectionState_Connecting:
             // Host: accept incoming P2P connections on our listen socket
             if (impl->listen_socket != k_HSteamListenSocket_Invalid && impl->sockets) {
+                if (info->m_info.m_hListenSocket != impl->listen_socket) break;
                 spdlog::info("Steam: accepting incoming connection");
                 if (impl->sockets->AcceptConnection(info->m_hConn) != k_EResultOK) {
                     spdlog::error("Steam: failed to accept connection");
                     impl->sockets->CloseConnection(info->m_hConn, 0, "AcceptFailed", false);
+                } else {
+                    impl->connection = info->m_hConn;
                 }
+            } else if (info->m_hConn != impl->connection) {
+                spdlog::debug("Steam: ignoring stale connecting callback");
             }
             break;
 
         case k_ESteamNetworkingConnectionState_Connected:
+            if (info->m_hConn != impl->connection) {
+                spdlog::debug("Steam: ignoring stale connected callback");
+                break;
+            }
             spdlog::info("Steam: peer connected");
-            impl->connection = info->m_hConn;
             impl->connected = true;
             // Try to resolve peer name via Steam Friends API
             {
@@ -213,7 +236,10 @@ void on_connection_status_changed(SteamNetConnectionStatusChangedCallback_t* inf
 SteamNetworkTransport::SteamNetworkTransport() : impl_(std::make_unique<Impl>()) {
     spdlog::info("Steam network transport created");
 
-    g_active_transport.store(this, std::memory_order_release);
+    {
+        std::lock_guard lock(g_active_transport_mutex);
+        g_active_transport.store(this, std::memory_order_release);
+    }
 
     // Initialize Steam networking interface
     impl_->sockets = SteamNetworkingSockets();
@@ -226,18 +252,23 @@ SteamNetworkTransport::SteamNetworkTransport() : impl_(std::make_unique<Impl>())
 SteamNetworkTransport::~SteamNetworkTransport() {
     // Publish the null first so any Steam callback arriving mid-teardown
     // bails out in on_connection_status_changed before we destroy impl_.
-    SteamNetworkTransport* expected = this;
-    g_active_transport.compare_exchange_strong(expected, nullptr,
-                                               std::memory_order_acq_rel);
+    {
+        std::lock_guard lock(g_active_transport_mutex);
+        SteamNetworkTransport* expected = this;
+        g_active_transport.compare_exchange_strong(expected, nullptr,
+                                                   std::memory_order_acq_rel);
+    }
     disconnect();
 }
 
 bool SteamNetworkTransport::host(uint16_t port) {
+    std::lock_guard lock(impl_->state_mutex);
     if (!impl_->sockets) {
         spdlog::error("Steam: cannot host - ISteamNetworkingSockets not available");
         return false;
     }
 
+    port = normalize_virtual_port(port);
     spdlog::info("Steam: hosting on virtual port {}", port);
     impl_->is_host = true;
 
@@ -279,16 +310,31 @@ bool SteamNetworkTransport::host(uint16_t port) {
 }
 
 bool SteamNetworkTransport::connect(const std::string& steam_id_or_ip, uint16_t port) {
+    std::lock_guard lock(impl_->state_mutex);
     if (!impl_->sockets) {
         spdlog::error("Steam: cannot connect - ISteamNetworkingSockets not available");
         return false;
     }
 
-    spdlog::info("Steam: connecting to {} on port {}", steam_id_or_ip, port);
+    port = normalize_virtual_port(port);
+    spdlog::info("Steam: connecting to {} on virtual port {}", steam_id_or_ip, port);
 
     // Parse Steam ID and create P2P connection
+    uint64_t steam_id = 0;
+    try {
+        std::size_t parsed = 0;
+        steam_id = std::stoull(steam_id_or_ip, &parsed);
+        if (parsed != steam_id_or_ip.size() || steam_id == 0) {
+            spdlog::error("Steam: invalid Steam ID '{}'", steam_id_or_ip);
+            return false;
+        }
+    } catch (const std::exception&) {
+        spdlog::error("Steam: invalid Steam ID '{}'", steam_id_or_ip);
+        return false;
+    }
+
     SteamNetworkingIdentity identity;
-    identity.SetSteamID64(std::stoull(steam_id_or_ip));
+    identity.SetSteamID64(steam_id);
 
     SteamNetworkingConfigValue_t opt;
     opt.SetPtr(k_ESteamNetworkingConfig_Callback_ConnectionStatusChanged,
@@ -306,6 +352,7 @@ bool SteamNetworkTransport::connect(const std::string& steam_id_or_ip, uint16_t 
 
 void SteamNetworkTransport::disconnect() {
     if (!impl_ || !impl_->sockets) return;
+    std::lock_guard lock(impl_->state_mutex);
 
     if (impl_->connection != k_HSteamNetConnection_Invalid) {
         impl_->sockets->CloseConnection(impl_->connection, 0, "Disconnect", true);
@@ -333,6 +380,7 @@ void SteamNetworkTransport::disconnect() {
 }
 
 bool SteamNetworkTransport::send(const uint8_t* data, size_t size, bool reliable) {
+    std::lock_guard lock(impl_->state_mutex);
     if (!impl_->connected || !impl_->sockets) return false;
     if (impl_->connection == k_HSteamNetConnection_Invalid) return false;
 
@@ -364,9 +412,12 @@ void SteamNetworkTransport::poll() {
     ISteamNetworkingMessage* messages[16];
     int count = 0;
 
-    if (impl_->connection != k_HSteamNetConnection_Invalid) {
-        count = impl_->sockets->ReceiveMessagesOnConnection(
-            impl_->connection, messages, 16);
+    {
+        std::lock_guard lock(impl_->state_mutex);
+        if (impl_->connection != k_HSteamNetConnection_Invalid) {
+            count = impl_->sockets->ReceiveMessagesOnConnection(
+                impl_->connection, messages, 16);
+        }
     }
 
     for (int i = 0; i < count; ++i) {
@@ -384,14 +435,19 @@ void SteamNetworkTransport::poll() {
 }
 
 bool SteamNetworkTransport::is_connected() const {
-    return impl_ && impl_->connected;
+    if (!impl_) return false;
+    std::lock_guard lock(impl_->state_mutex);
+    return impl_->connected;
 }
 
 std::string SteamNetworkTransport::peer_name() const {
-    return impl_ ? impl_->peer_name_str : "";
+    if (!impl_) return "";
+    std::lock_guard lock(impl_->state_mutex);
+    return impl_->peer_name_str;
 }
 
 void SteamNetworkTransport::invite_friend() {
+    std::lock_guard lock(impl_->state_mutex);
     if (!impl_->lobby_id.IsValid()) {
         if (impl_->lobby_pending) {
             spdlog::warn("Steam: invite dialog not ready yet (lobby still creating). "
@@ -412,6 +468,7 @@ void SteamNetworkTransport::invite_friend() {
 }
 
 void SteamNetworkTransport::on_lobby_join(uint64_t steam_id) {
+    std::lock_guard lock(impl_->state_mutex);
     spdlog::info("Friend joined: {}", steam_id);
     impl_->connected = true;
     impl_->peer_name_str = SteamFriends()->GetFriendPersonaName(CSteamID(steam_id));

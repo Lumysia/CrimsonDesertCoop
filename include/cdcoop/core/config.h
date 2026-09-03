@@ -8,7 +8,8 @@ namespace cdcoop {
 struct Config {
     // Networking
     std::string player_name = "Player";
-    uint16_t port = 27015;
+    uint16_t port = 0; // Steam P2P virtual port, not a UDP port (must be < 1000)
+    std::string join_steam_id; // When set, F7 joins this peer instead of hosting
     bool use_steam_networking = true;
 
     // Gameplay
@@ -36,6 +37,9 @@ struct Config {
     // animation evaluator hook and the dragon HP dynamic scan. Disable if
     // the mod becomes unstable after a game patch.
     bool enable_experimental_hooks = false;
+    // The current DX12 renderer cannot yet capture the game's command queue.
+    // Keep GPU overlay injection opt-in; Present is still hooked for ticking.
+    bool enable_experimental_overlay = false;
     // When true, after WorldSystem resolves, scan its sibling pointers and
     // log their vtable RVAs to cdcoop_world_probe.log to help the community
     // identify the quest / cutscene / world-object managers.
@@ -50,13 +54,14 @@ struct Config {
     void save(const std::string& path) const;
 
     NLOHMANN_DEFINE_TYPE_INTRUSIVE_WITH_DEFAULT(Config,
-        player_name, port, use_steam_networking,
+        player_name, port, join_steam_id, use_steam_networking,
         enemy_hp_multiplier, enemy_dmg_multiplier, tether_distance,
         sync_cutscenes, sync_quest_progress, sync_fast_travel,
         sync_mount_state, skip_animation_remap,
         player2_model_id, player2_use_companion_slot,
         debug_overlay, log_packets, log_level,
-        enable_experimental_hooks, dump_world_system_probe,
+        enable_experimental_hooks,
+        enable_experimental_overlay, dump_world_system_probe,
         toggle_overlay_key, open_session_key
     )
 };

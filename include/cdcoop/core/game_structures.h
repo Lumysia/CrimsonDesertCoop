@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <array>
 #include <string>
@@ -1111,6 +1112,20 @@ inline bool is_valid_ptr(uintptr_t addr) {
            addr <= kMaximumUserPointerAddress;
 }
 
+// Whether [addr, addr+size) is currently committed and readable — i.e. it can
+// be dereferenced without faulting. Stronger than is_valid_ptr, which only
+// range-checks the numeric value: a hardcoded RVA or a reverse-engineered
+// pointer-chain offset can be well inside the canonical user-address range yet
+// point past the (patched, relaid-out, or smaller) module image or into a
+// freed allocation, where a bare read triggers an access violation and takes
+// the whole game down. Backed by VirtualQuery, so it reflects the live page
+// state. Use it before dereferencing any address a game patch could have
+// invalidated. Read-only; never mutates memory. Defined in game_structures.cpp
+// because it needs <Windows.h>, which we keep out of this widely-included
+// header.
+bool is_readable(uintptr_t addr, std::size_t size);
+bool is_writable(uintptr_t addr, std::size_t size);
+
 // Helper to read game memory safely. Rejects both null and obviously-
 // bogus pointers (too-low static / zero-page addresses, and too-high
 // sign-extended / kernel addresses) — the latter is the real win over
@@ -1119,14 +1134,20 @@ inline bool is_valid_ptr(uintptr_t addr) {
 template<typename T>
 T read_mem(uintptr_t base, uint32_t offset) {
     if (!is_valid_ptr(base)) return T{};
-    auto* ptr = reinterpret_cast<T*>(base + offset);
+    if (offset > UINTPTR_MAX - base) return T{};
+    const uintptr_t addr = base + offset;
+    if (!is_readable(addr, sizeof(T))) return T{};
+    auto* ptr = reinterpret_cast<const T*>(addr);
     return *ptr;
 }
 
 template<typename T>
 bool write_mem(uintptr_t base, uint32_t offset, const T& value) {
     if (!is_valid_ptr(base)) return false;
-    *reinterpret_cast<T*>(base + offset) = value;
+    if (offset > UINTPTR_MAX - base) return false;
+    const uintptr_t addr = base + offset;
+    if (!is_writable(addr, sizeof(T))) return false;
+    *reinterpret_cast<T*>(addr) = value;
     return true;
 }
 

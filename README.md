@@ -2,9 +2,18 @@
 
 A co-op multiplayer mod for [Crimson Desert](https://store.steampowered.com/app/3321460/Crimson_Desert/) that allows two players to play through the game together. The host player's game world is shared with a second player who joins via Steam P2P networking.
 
-> **Status: 0.2.3 In Development - Core Systems Functional, Research Hooks Opt-In**
+> **Status: 0.3.0 Pre-Alpha - Safe Player-Sync Baseline**
 >
-> Player position sync, companion hijacking, damage tracking, enemy HP sync, DX12 overlay, and Steam P2P networking all work with verified offsets. Animation sync defaults to passthrough but will switch to a CDAnimCancel-derived evaluator hook when `enable_experimental_hooks` is set. Dragon HP is resolved on the fly via a float-plausibility scan at first dragon mount (now via a register-correct mid-hook in 0.2.3). The fast-travel mid-hook captures the host's waypoint targets when `sync_fast_travel` is enabled — the apply path on the receiver is still log-only pending field testing. Mount HP / stamina broadcasts both ways when `sync_mount_state` is enabled so each player sees the other's mount status in the overlay. Quest sync, cutscene sync, and world interaction sync remain **not applied server-side** - set `dump_world_system_probe` to generate telemetry that identifies the manager pointers. See [What's New in 0.2.3](#whats-new-in-023), [Current Limitations](#current-limitations), and [Contributing](#contributing).
+> Steam connection polling, handshake retry, symmetric companion hijacking, position interpolation, and health state handling form the current testable MVP on a supported game build. The July 2026 game update invalidated the published core signatures; until fresh offsets are verified, the mod detects that build and refuses to start a co-op session instead of risking a save-load crash. Enemy/combat sync and direct animation writes are disabled because their previous hook ABI/entity mapping was unsafe. DX12 overlay rendering is experimental and off by default; the Present hook remains tick-only.
+
+## What's New in 0.3.0
+
+- Fixed the Steam session deadlock: transports are polled while hosting and connecting, and clients send/retry the handshake only after the asynchronous P2P connection is ready.
+- Both peers now hijack a local companion for the remote player, with retry when the companion appears after loading.
+- Position-only packets no longer overwrite remote HP/animation state, reconnects clear stale state, and no companion writes occur before the first valid packet.
+- Added committed-page checks for game-memory reads/writes and fail-closed unsupported-build detection.
+- Disabled unsafe legacy inline hooks and unverified enemy synchronization.
+- Added a Windows build workflow and packet validation tests.
 
 ## What's New in 0.2.3
 
@@ -72,7 +81,10 @@ These features are **still not fully functional in-game** and need further resea
 
 | Feature | Status | What's Blocking It |
 |---------|--------|--------------------|
-| Animation sync (cross-model) | Passthrough only (0.1.x behavior) + evaluator write path (experimental) | Per-model animation IDs still need PAZ extraction for true remap. The evaluator hook captures the right struct but the ID namespace differs per character model |
+| Player position / health | Network path implemented, field testing required | Requires refreshed core signatures on the July 2026+ game build; world-origin rebasing still needs verification |
+| Animation sync (cross-model) | Direct actor writes disabled | Per-model animation IDs still need PAZ extraction and the evaluator must be mapped per remote companion |
+| Enemy / combat sync | Disabled | Previous ActorManager enumeration and pointer-derived IDs were not valid across processes |
+| DX12 overlay | Experimental, off by default | The game's DirectX command queue and cross-queue fence lifecycle are not yet captured safely |
 | Fast-travel sync | Capture-only mid-hook (opt-in via `sync_fast_travel`) | Hook reads the host's waypoint and broadcasts `TELEPORT_TRIGGER`; receive-side is log-only because the native apply function isn't identified. CD Companion's physics-delta path is documented as a possible opt-in fallback, but not wired |
 | Quest sync | Receive-side stub + candidate pointer logging | Quest manager identity is now probed - set `dump_world_system_probe=true`, reproduce progress on host, and send `cdcoop_world_probe.log` to the issue tracker |
 | Cutscene sync | Receive-side stub + candidate pointer logging | Same probe as above. Trigger function still unknown |
@@ -143,14 +155,14 @@ This mod works with [JSON Mod Manager](https://www.nexusmods.com/crimsondesert/m
 
 | Key | Action |
 |-----|--------|
-| **F7** | Host a co-op session / Open join dialog |
-| **F8** | Toggle the co-op overlay UI |
+| **F7** | Host, or join `join_steam_id` when configured |
+| **F8** | Toggle the opt-in experimental overlay UI |
 
 ### Hosting
 
-1. Press **F7** to start hosting
+1. Leave `join_steam_id` empty and press **F7** to start hosting
 2. Share your Steam ID with your friend, or use the Steam overlay to invite them
-3. Your friend needs the mod installed too - they press F7 and enter your Steam ID to join
+3. Your friend sets `join_steam_id` to your Steam ID and presses F7, or joins through Steam while both games are running
 
 ### Configuration
 
@@ -159,7 +171,8 @@ Edit `cdcoop_config.json` in the game directory. The file is auto-created with d
 ```json
 {
     "player_name": "Player",
-    "port": 27015,
+    "port": 0,
+    "join_steam_id": "",
     "use_steam_networking": true,
 
     "enemy_hp_multiplier": 1.5,
@@ -176,6 +189,7 @@ Edit `cdcoop_config.json` in the game directory. The file is auto-created with d
     "player2_use_companion_slot": true,
 
     "debug_overlay": false,
+    "enable_experimental_overlay": false,
     "log_packets": false,
     "log_level": 2,
 
@@ -190,6 +204,8 @@ Edit `cdcoop_config.json` in the game directory. The file is auto-created with d
 | Option | Default | Description |
 |--------|---------|-------------|
 | `player_name` | `"Player"` | Display name in co-op |
+| `port` | `0` | Steam P2P virtual port. This is not a UDP port and must be below 1000 |
+| `join_steam_id` | `""` | If set, F7 joins this Steam ID instead of hosting |
 | `enemy_hp_multiplier` | `1.5` | Scale enemy HP for 2 players |
 | `enemy_dmg_multiplier` | `1.0` | Scale enemy damage |
 | `tether_distance` | `150.0` | Max distance between players (meters) |
@@ -201,6 +217,7 @@ Edit `cdcoop_config.json` in the game directory. The file is auto-created with d
 | `player2_model_id` | `-1` | -1 = same as host character model |
 | `player2_use_companion_slot` | `true` | Hijack companion vs spawn new entity |
 | `debug_overlay` | `false` | Show debug info + hook status in overlay |
+| `enable_experimental_overlay` | `false` | Opt into the unverified DX12 ImGui renderer. Present remains hooked for networking when disabled |
 | `log_packets` | `false` | Log network packets to cdcoop.log |
 | `log_level` | `2` | 0=trace, 1=debug, 2=info, 3=warn, 4=error |
 | `enable_experimental_hooks` | `false` | Install CDAnimCancel animation-evaluator hook and dragon HP probe. Disable if mod becomes unstable after a game patch |

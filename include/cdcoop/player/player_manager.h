@@ -20,6 +20,8 @@ public:
     Quat local_rotation() const;
     float local_health() const;
     float local_max_health() const;
+    bool read_local_state(Vec3& position, Quat& rotation,
+                          float& health, float& max_health);
 
     // Remote player (the hijacked companion entity)
     uintptr_t remote_player() const;
@@ -32,9 +34,12 @@ private:
     PlayerManager() = default;
 
     void find_local_player();
+    void invalidate_local_player();
 
     uintptr_t local_player_ = 0;
     uintptr_t game_instance_ = 0;
+    float local_resolve_retry_timer_ = 0.0f;
+    float remote_spawn_retry_timer_ = 0.0f;
 };
 
 } // namespace cdcoop

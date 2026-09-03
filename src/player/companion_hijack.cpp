@@ -2,6 +2,7 @@
 #include <cdcoop/core/hooks.h>
 #include <cdcoop/core/game_structures.h>
 #include <spdlog/spdlog.h>
+#include <cmath>
 
 namespace cdcoop {
 
@@ -11,37 +12,13 @@ CompanionHijack& CompanionHijack::instance() {
 }
 
 bool CompanionHijack::initialize() {
-    // Find the companion system/manager in the game's memory
-    // This is the system that manages AI companions like Oongka, Yann, Naira
-    //
-    // Approach to finding this:
-    // 1. Use ReClass.NET or Cheat Engine to find companion entities
-    // 2. Trace back to the manager/spawner that owns them
-    // 3. Find the companion list/array
-    //
-    // The companion system likely lives as a subsystem of the game instance:
-    //   GameInstance -> CompanionManager -> CompanionEntity[]
-
-    auto& rt = get_runtime_offsets();
-
-    // Resolve companion system from the WorldSystem/ActorManager chain.
-    // Companions are actors managed by the ActorManager, reachable via the
-    // same WorldSystem singleton used for the player actor.
-    if (rt.world_system_resolved && is_valid_ptr(rt.actor_manager_ptr)) {
-        companion_system_ = rt.actor_manager_ptr;
-    } else if (rt.world_system_resolved) {
-        companion_system_ = resolve_ptr_chain(rt.world_system_ptr, {
-            offsets::World::ACTOR_MANAGER
-        });
-    }
-
-    if (companion_system_ == 0) {
-        spdlog::warn("CompanionHijack: could not find companion system");
-        spdlog::warn("This is expected if no companion is currently spawned");
+    // Body slots are read directly from the player actor; ActorManager is not
+    // required when the independent PlayerBase path resolved successfully.
+    if (!is_valid_ptr(get_runtime_offsets().player_actor_ptr)) {
+        spdlog::warn("CompanionHijack: player actor is not available yet");
         return false;
     }
 
-    spdlog::info("CompanionHijack: companion system at 0x{:X}", companion_system_);
     return true;
 }
 
@@ -51,27 +28,21 @@ void CompanionHijack::shutdown() {
 
 bool CompanionHijack::activate() {
     if (active_) {
-        spdlog::warn("CompanionHijack: already active");
-        return true;
+        if (is_active()) return true;
+        deactivate();
     }
 
-    if (companion_system_ == 0) {
-        // Try to re-initialize
-        if (!initialize()) return false;
-    }
+    if (!initialize()) return false;
 
     // Strategy: find the first active companion and take it over
     //
     // Crimson Desert has companion characters (Oongka, Yann, Naira) that
-    // fight alongside the player. We replace one's AI controller with our
-    // network-driven controller.
+    // fight alongside the player. We reuse one as the remote rendered actor.
     //
     // Steps:
-    // 1. Read companion array from companion_system_
-    // 2. Find first active companion
-    // 3. Save its AI controller pointer
-    // 4. Null out / replace the AI controller (disables AI)
-    // 5. We now control this entity via set_position/set_animation
+    // 1. Scan the player's body slots
+    // 2. Find the first active companion
+    // 3. Apply validated remote position/health state
 
     // Iterate companion/NPC actor body slots from the ActorManager.
     // The player actor uses body slots at offsets 0xD0-0x108 (8 slots, 8 bytes each)
@@ -96,10 +67,22 @@ bool CompanionHijack::activate() {
             uintptr_t ai_ctrl = read_mem<uintptr_t>(companion, offsets::Companion::AI_CONTROLLER);
             if (!is_valid_ptr(ai_ctrl)) continue;
 
+            uintptr_t type_ptr = resolve_ptr_chain(companion, {
+                ActorStructure::TYPE_CHAIN_COMP,
+                ActorStructure::TYPE_CHAIN_ACTOR,
+                ActorStructure::TYPE_CHAIN_TYPE
+            });
+            uint8_t actor_type = read_mem<uint8_t>(type_ptr, ActorStructure::TYPE_BYTE);
+            if (actor_type < ActorStructure::TYPE_PARTY_MIN ||
+                actor_type > ActorStructure::TYPE_PARTY_MAX) {
+                continue;
+            }
+            if (get_runtime_offsets().child_actor_vtbl != 0 && !is_child_actor(companion)) {
+                continue;
+            }
+
             hijacked_entity_ = companion;
             hijacked_slot_ = i;
-            original_ai_ctrl_ = ai_ctrl;
-            disable_ai();
             active_ = true;
             spdlog::info("CompanionHijack: found companion at body slot {} (0x{:X})",
                           i, companion);
@@ -120,19 +103,38 @@ bool CompanionHijack::activate() {
 void CompanionHijack::deactivate() {
     if (!active_) return;
 
-    // Restore AI controller
-    enable_ai();
-
     spdlog::info("CompanionHijack: released companion slot {}", hijacked_slot_);
 
     hijacked_entity_ = 0;
-    original_ai_ctrl_ = 0;
     hijacked_slot_ = -1;
     active_ = false;
 }
 
+void CompanionHijack::invalidate() {
+    hijacked_entity_ = 0;
+    hijacked_slot_ = -1;
+    active_ = false;
+}
+
+bool CompanionHijack::is_active() const {
+    if (!active_ || hijacked_slot_ < 0 || !is_valid_ptr(hijacked_entity_)) return false;
+    uintptr_t player = get_runtime_offsets().player_actor_ptr;
+    if (!is_valid_ptr(player)) return false;
+    uint32_t slot = ActorStructure::BODY_SLOT_0 +
+                    static_cast<uint32_t>(hijacked_slot_) * sizeof(uintptr_t);
+    return read_mem<uintptr_t>(player, slot) == hijacked_entity_;
+}
+
 void CompanionHijack::set_position(const Vec3& pos, const Quat& rot) {
     if (!active_ || !is_valid_ptr(hijacked_entity_)) return;
+    const float quat_len_sq = rot.x * rot.x + rot.y * rot.y +
+                              rot.z * rot.z + rot.w * rot.w;
+    if (!std::isfinite(pos.x) || !std::isfinite(pos.y) || !std::isfinite(pos.z) ||
+        std::abs(pos.x) > 10'000'000.0f || std::abs(pos.y) > 10'000'000.0f ||
+        std::abs(pos.z) > 10'000'000.0f || !std::isfinite(quat_len_sq) ||
+        quat_len_sq < 0.9f || quat_len_sq > 1.1f) {
+        return;
+    }
 
     // Use the verified position chain: actor -> +0x40 -> +0x08 -> core -> +0x248 -> +0x90
     // This writes to the authoritative position, not a cache.
@@ -155,10 +157,8 @@ void CompanionHijack::set_position(const Vec3& pos, const Quat& rot) {
         }
     }
 
-    // Fallback: direct write to entity base (less reliable)
-    write_mem<float>(hijacked_entity_, offsets::Player::POSITION_X, pos.x);
-    write_mem<float>(hijacked_entity_, offsets::Player::POSITION_Y, pos.y);
-    write_mem<float>(hijacked_entity_, offsets::Player::POSITION_Z, pos.z);
+    // Never guess position fields on the actor base. Offsets 0/4/8 describe
+    // the hook-time r13 vector, and writing them here would corrupt the vtable.
 }
 
 void CompanionHijack::set_animation(uint32_t anim_id, float blend,
@@ -174,6 +174,11 @@ void CompanionHijack::set_animation(uint32_t anim_id, float blend,
 
 void CompanionHijack::set_health(float health, float max_health) {
     if (!active_ || hijacked_entity_ == 0) return;
+    if (!std::isfinite(health) || !std::isfinite(max_health) ||
+        health < 0.0f || max_health <= 0.0f || health > max_health * 2.0f ||
+        max_health > 10'000'000.0f) {
+        return;
+    }
 
     // Write player 2's health to the companion entity's stat component so the
     // game engine renders the correct health bar. Uses the same StatEntry format
@@ -185,23 +190,6 @@ void CompanionHijack::set_health(float health, float max_health) {
         write_mem<int64_t>(stat_base, StatEntry::MAX_VALUE,
                            static_cast<int64_t>(max_health * 1000.0f));
     }
-}
-
-void CompanionHijack::disable_ai() {
-    if (!is_valid_ptr(hijacked_entity_)) return;
-
-    // Null out the AI controller pointer so the companion doesn't move on its own.
-    // The AI controller is at offset 0x48 (component link) on the actor.
-    write_mem<uintptr_t>(hijacked_entity_, offsets::Companion::AI_CONTROLLER, 0);
-    spdlog::debug("CompanionHijack: AI disabled for entity 0x{:X}", hijacked_entity_);
-}
-
-void CompanionHijack::enable_ai() {
-    if (!is_valid_ptr(hijacked_entity_) || original_ai_ctrl_ == 0) return;
-
-    // Restore the original AI controller
-    write_mem<uintptr_t>(hijacked_entity_, offsets::Companion::AI_CONTROLLER, original_ai_ctrl_);
-    spdlog::debug("CompanionHijack: AI restored for entity 0x{:X}", hijacked_entity_);
 }
 
 } // namespace cdcoop

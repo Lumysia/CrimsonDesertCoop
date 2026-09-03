@@ -14,24 +14,10 @@ EnemySync& EnemySync::instance() {
 }
 
 void EnemySync::initialize() {
-    auto& session = Session::instance();
-
-    session.register_handler(PacketType::ENEMY_STATE,
-        [this](PacketType, const uint8_t* data, size_t size) {
-            on_remote_enemy_state(data, size);
-        });
-
-    session.register_handler(PacketType::ENEMY_DAMAGE,
-        [this](PacketType, const uint8_t* data, size_t size) {
-            on_remote_enemy_damage(data, size);
-        });
-
-    session.register_handler(PacketType::ENEMY_DEATH,
-        [this](PacketType, const uint8_t* data, size_t size) {
-            on_remote_enemy_death(data, size);
-        });
-
-    spdlog::info("EnemySync initialized");
+    // ActorManager enumeration and cross-process entity IDs are not resolved
+    // yet. Registering receive handlers would let peer packets write arbitrary
+    // body-slot actors, so keep the subsystem inert until stable IDs exist.
+    spdlog::warn("EnemySync disabled: actor enumeration/entity mapping is unverified");
 }
 
 void EnemySync::shutdown() {
@@ -39,6 +25,10 @@ void EnemySync::shutdown() {
 }
 
 void EnemySync::update(float delta_time) {
+    (void)delta_time;
+    return;
+
+#if 0
     auto& session = Session::instance();
     if (!session.is_active() || !session.is_host()) return;
 
@@ -102,6 +92,7 @@ void EnemySync::update(float delta_time) {
         uint32_t entity_id = static_cast<uint32_t>(entity & 0xFFFFFFFF);
         on_enemy_state_changed(entity_id, pos, {0,0,0,1}, health, state);
     }
+#endif
 }
 
 void EnemySync::on_enemy_state_changed(uint32_t entity_id, const Vec3& pos,
@@ -163,6 +154,10 @@ void EnemySync::report_damage(uint32_t entity_id, float damage) {
 }
 
 void EnemySync::apply_coop_scaling() {
+    spdlog::warn("Enemy co-op scaling skipped: EnemySync is disabled");
+    return;
+
+#if 0
     auto& cfg = get_config();
     auto& rt = get_runtime_offsets();
 
@@ -212,6 +207,7 @@ void EnemySync::apply_coop_scaling() {
     }
 
     spdlog::info("Co-op scaling applied to {} enemies", scaled_count);
+#endif
 }
 
 void EnemySync::revert_coop_scaling() {

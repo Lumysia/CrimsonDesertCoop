@@ -74,6 +74,7 @@ bool HookManager::initialize() {
     // =====================================================================
 
     status_ = {};
+    core_signature_found_ = false;
 
     // Try a pair of (primary, fallback) signatures for the same logical hook,
     // and record the outcome in HookStatus.
@@ -110,33 +111,29 @@ bool HookManager::initialize() {
         resolve_player_base();
     }
 
+    // A matching core signature with a null runtime pointer is normal on the
+    // main menu. Only fail closed when none of the version-specific anchors
+    // match this executable at all.
+    if (!core_signature_found_) {
+        status_.unsupported_build = true;
+        spdlog::error("No core signatures match this game build. Game-memory hooks "
+                      "and co-op sessions are disabled until offsets are updated.");
+        initialized_ = true;
+        return true;
+    }
+
     // --- ChildActor vtable resolution (from EquipHide, 3 fallback sigs) ---
     // Populates rt.child_actor_vtbl. Used by is_child_actor() to filter
     // child entities (companions, summons) from regular enemies during
     // ActorManager body-slot iteration. Best-effort — failure is non-fatal.
     resolve_child_actor_vtbl();
 
-    // --- Player position hook ---
-    // r13 = float* position array [X, Y, Z]
-    try_hook_pair(signatures::POSITION_PRIMARY, signatures::POSITION_FALLBACK,
-                  "PositionAccess",
-                  hooks::player_position_detour, hooks::player_position_hook, true);
-
-    // --- Damage calculation hook ---
-    // r15 = damage source ptr, r12 = damage amount (32-bit)
-    try_hook_pair(signatures::DAMAGE_SLOT_PRIMARY, nullptr,
-                  "DamageSlot",
-                  hooks::damage_calc_detour, hooks::damage_calc_hook, true);
-
-    // --- Stat write hook (shared by health/stamina/spirit) ---
-    try_hook_pair(signatures::STAT_WRITE_PRIMARY, signatures::STAT_WRITE_FALLBACK,
-                  "StatWrite",
-                  hooks::world_state_detour, hooks::world_state_hook, true);
-
-    // --- Camera Zoom/FOV hook (r12 = camera, +0xD8 = zoom) ---
-    try_hook_pair(signatures::CAMERA_ZOOM_FOV, signatures::CAMERA_ZOOM_FOV_NONWILD,
-                  "CameraZoomFOV",
-                  hooks::camera_detour, hooks::camera_hook, false);
+    // These AOBs identify mid-function register sites, not callable function
+    // entries. The old inline detours used the C ABI and could corrupt register
+    // state. Position polling already uses the verified pointer chain; the
+    // remaining features stay disabled until they are rebuilt as mid hooks and
+    // field-tested against a supported game build.
+    spdlog::warn("Unsafe legacy Position/Damage/Stat/Camera hooks are disabled");
 
     // --- Game tick: DX12 Present drives the update loop ---
     spdlog::info("Game tick: using DX12 Present hook as frame tick (no dedicated sig needed)");
@@ -407,14 +404,19 @@ bool HookManager::resolve_world_system() {
                                 int rip_offset, [[maybe_unused]] int rip_end) -> bool {
         auto result = sig_scan(sig, name);
         if (!result) return false;
+        core_signature_found_ = true;
 
         // Follow the RIP-relative address
         uintptr_t rip_addr = result.address + rip_offset;
         rt.world_system_ptr = MemoryScanner::follow_rel32(rip_addr, 0);
 
-        if (is_valid_ptr(rt.world_system_ptr)) {
+        // is_readable, not just is_valid_ptr: if a patched build makes this
+        // signature match at the wrong place, the computed RIP target can point
+        // at unmapped memory, and the dereference below would fault. Fail closed
+        // instead of crashing.
+        if (is_readable(rt.world_system_ptr, sizeof(uintptr_t))) {
             // Dereference to get actual WorldSystem pointer
-            uintptr_t ws = *reinterpret_cast<uintptr_t*>(rt.world_system_ptr);
+            uintptr_t ws = read_mem<uintptr_t>(rt.world_system_ptr, 0);
             if (is_valid_ptr(ws)) {
                 rt.world_system_ptr = ws;
                 rt.world_system_resolved = true;
@@ -492,11 +494,12 @@ bool HookManager::resolve_player_base() {
     // Method 1: Signature-based RIP-relative resolution (from bbfox0703 CT)
     auto result = sig_scan(signatures::PLAYER_BASE_DISCOVERY, "PlayerBaseDiscovery");
     if (result) {
+        core_signature_found_ = true;
         uintptr_t rip_addr = result.address + signatures::PLAYER_BASE_DISCOVERY_RIP_OFFSET;
         uintptr_t player_base_storage = MemoryScanner::follow_rel32(rip_addr, 0);
 
-        if (is_valid_ptr(player_base_storage)) {
-            uintptr_t player_base = *reinterpret_cast<uintptr_t*>(player_base_storage);
+        if (is_readable(player_base_storage, sizeof(uintptr_t))) {
+            uintptr_t player_base = read_mem<uintptr_t>(player_base_storage, 0);
             if (is_valid_ptr(player_base)) {
                 // Follow the chain to find the player actor:
                 // base -> +0x18 -> +0xA0 -> +0xD0 -> +0x68 (Kliff)
@@ -520,27 +523,44 @@ bool HookManager::resolve_player_base() {
         }
     }
 
-    // Method 2: Hardcoded static base (last resort, v1.01.03)
-    uintptr_t static_base = game_base_ + offsets::PlayerBase::STATIC_RVA;
-    uintptr_t player_base = *reinterpret_cast<uintptr_t*>(static_base);
-    if (is_valid_ptr(player_base)) {
-        uintptr_t actor = resolve_ptr_chain(player_base, {
-            offsets::PlayerBase::CHAIN_0,
-            offsets::PlayerBase::CHAIN_1,
-            offsets::PlayerBase::CHAIN_2,
-            offsets::PlayerBase::SLOT_KLIFF
-        });
+    // Method 2: Hardcoded static base (last resort, v1.01.03).
+    // Unlike Method 1, this RVA is a blind guess against the old (March 2026)
+    // image layout — no signature backs it. After a game patch the address can
+    // fall outside the relaid-out (or smaller) module image, so we must confirm
+    // it is inside the module AND currently mapped before reading it. A bare
+    // dereference here is the crash reported when a patch moves every offset:
+    // the signatures fail, we fall through to this read, and it faults on
+    // unmapped memory. is_valid_ptr can't catch it (the address is numerically
+    // in range) — only a bounds + committed-memory check can.
+    const uintptr_t static_rva = offsets::PlayerBase::STATIC_RVA;
+    const uintptr_t static_base = game_base_ + static_rva;
+    if (static_rva <= game_size_ && sizeof(uintptr_t) <= game_size_ - static_rva &&
+        is_readable(static_base, sizeof(uintptr_t))) {
+        uintptr_t player_base = read_mem<uintptr_t>(static_base, 0);
+        if (is_valid_ptr(player_base)) {
+            uintptr_t actor = resolve_ptr_chain(player_base, {
+                offsets::PlayerBase::CHAIN_0,
+                offsets::PlayerBase::CHAIN_1,
+                offsets::PlayerBase::CHAIN_2,
+                offsets::PlayerBase::SLOT_KLIFF
+            });
 
-        if (is_valid_ptr(actor)) {
-            rt.player_actor_ptr = actor;
-            rt.player_resolved = true;
-            // Also resolve stats component
-            uintptr_t sb = resolve_ptr_chain(actor, {offsets::Player::STAT_COMPONENT});
-            if (is_valid_ptr(sb)) rt.player_stats_component = sb;
-            spdlog::info("Player resolved via static base (0x{:X}) at 0x{:X}",
-                         offsets::PlayerBase::STATIC_RVA, actor);
-            return true;
+            if (is_valid_ptr(actor)) {
+                rt.player_actor_ptr = actor;
+                rt.player_resolved = true;
+                // Also resolve stats component
+                uintptr_t sb = resolve_ptr_chain(actor, {offsets::Player::STAT_COMPONENT});
+                if (is_valid_ptr(sb)) rt.player_stats_component = sb;
+                spdlog::info("Player resolved via static base (0x{:X}) at 0x{:X}",
+                             static_rva, actor);
+                return true;
+            }
         }
+    } else {
+        spdlog::warn("Static player base RVA 0x{:X} is outside the current module "
+                     "image (size 0x{:X}) or not mapped — game version likely "
+                     "changed; skipping hardcoded fallback to avoid a crash",
+                     static_rva, game_size_);
     }
 
     spdlog::warn("Failed to resolve player via PlayerBase methods");

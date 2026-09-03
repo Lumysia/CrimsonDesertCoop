@@ -144,6 +144,11 @@ struct HandshakePacket {
 };
 #pragma pack(pop)
 
+static_assert(sizeof(PacketHeader) == 13);
+static_assert(sizeof(PlayerPositionPacket) == 54);
+static_assert(sizeof(PlayerFullStatePacket) == 78);
+static_assert(sizeof(HandshakePacket) == 85);
+
 // Packet serialization helpers
 class PacketBuilder {
 public:
