@@ -6,11 +6,30 @@ on:
 
 jobs:
   windows:
+    name: Windows (Steam ${{ matrix.steam }})
     runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        steam: ['OFF', 'ON']
     steps:
       - uses: actions/checkout@v5
+      - name: Fetch Steamworks SDK
+        if: matrix.steam == 'ON'
+        shell: pwsh
+        run: |
+          git init steamworks
+          git -C steamworks remote add origin https://github.com/rlabrecque/SteamworksSDK.git
+          git -C steamworks sparse-checkout init --cone
+          git -C steamworks sparse-checkout set public redistributable_bin/win64
+          git -C steamworks fetch --depth 1 origin df2baabf574a738ef1ea90a7e89339107fc0a279
+          git -C steamworks checkout --detach FETCH_HEAD
       - name: Configure
-        run: cmake -S . -B build -A x64 -DCDCOOP_USE_STEAM=OFF -DCDCOOP_BUILD_TESTS=ON
+        run: >-
+          cmake -S . -B build -A x64
+          -DCDCOOP_USE_STEAM=${{ matrix.steam }}
+          -DCDCOOP_BUILD_TESTS=ON
+          -DSTEAMWORKS_SDK_PATH="${{ github.workspace }}/steamworks"
       - name: Build
         shell: pwsh
         run: |
