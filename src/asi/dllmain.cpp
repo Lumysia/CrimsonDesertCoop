@@ -29,6 +29,20 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 
 namespace {
 
+bool g_game_process = false;
+
+bool is_game_process() {
+    wchar_t path[MAX_PATH] = {};
+    DWORD len = GetModuleFileNameW(nullptr, path, MAX_PATH);
+    if (len == 0 || len == MAX_PATH) return false;
+
+    const wchar_t* filename = path;
+    for (DWORD i = 0; i < len; ++i) {
+        if (path[i] == L'\\' || path[i] == L'/') filename = path + i + 1;
+    }
+    return lstrcmpiW(filename, L"CrimsonDesert.exe") == 0;
+}
+
 // Appends a timestamped line to cdcoop_loaded.txt next to the DLL. Plain
 // WinAPI — never touches spdlog — so it works even if the logger failed
 // to open cdcoop.log (read-only install dir, antivirus, etc.). The marker
@@ -335,10 +349,15 @@ static void drop_load_marker(HMODULE hModule) {
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID) {
     if (reason == DLL_PROCESS_ATTACH) {
         DisableThreadLibraryCalls(hModule);
+        // Proxy ASI loaders can also load every plugin into helper executables
+        // located beside the game, including crashpad_handler.exe.
+        if (!is_game_process()) return TRUE;
+        g_game_process = true;
         drop_load_marker(hModule);
         // Launch initialization on a separate thread to avoid blocking DllMain
         std::thread(mod_main).detach();
     } else if (reason == DLL_PROCESS_DETACH) {
+        if (!g_game_process) return TRUE;
         spdlog::info("CrimsonDesertCoop shutting down...");
 
         // Stop worker threads before anything else so they can't observe
