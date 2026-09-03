@@ -42,8 +42,34 @@ void PlayerManager::shutdown() {
 void PlayerManager::update(float delta_time) {
     if (HookManager::instance().status().unsupported_build) return;
 
-    if (local_player_ != 0 && !is_readable(local_player_, sizeof(uintptr_t))) {
-        invalidate_local_player();
+    if (local_player_ != 0) {
+        const auto& rt = get_runtime_offsets();
+        bool actor_chain_changed = false;
+        if (is_valid_ptr(rt.player_component_table)) {
+            if (!is_valid_ptr(rt.actor_manager_ptr)) {
+                actor_chain_changed = true;
+            } else {
+                const uintptr_t current_actor_manager = read_mem<uintptr_t>(
+                    rt.world_system_ptr, offsets::World::ACTOR_MANAGER);
+                const uintptr_t current_child_actor = read_mem<uintptr_t>(
+                    rt.actor_manager_ptr, offsets::World::CHILD_ACTOR);
+                const uintptr_t current_component_table = read_mem<uintptr_t>(
+                    current_child_actor, offsets::Player::COMPONENT_TABLE);
+                const uintptr_t current_status = read_mem<uintptr_t>(
+                    current_component_table, offsets::Player::STATUS_COMPONENT);
+                const uintptr_t current_player = read_mem<uintptr_t>(
+                    current_status, offsets::Player::STATUS_PLAYER_DATA);
+                const uintptr_t current_transform = read_mem<uintptr_t>(
+                    current_component_table, offsets::Player::TRANSFORM_COMPONENT);
+                actor_chain_changed = current_actor_manager != rt.actor_manager_ptr ||
+                                      current_component_table != rt.player_component_table ||
+                                      current_player != local_player_ ||
+                                      current_transform != rt.player_transform_component;
+            }
+        }
+        if (!is_readable(local_player_, sizeof(uintptr_t)) || actor_chain_changed) {
+            invalidate_local_player();
+        }
     }
 
     // Re-acquire player pointer if lost (e.g., after loading screen)
@@ -204,7 +230,7 @@ uintptr_t PlayerManager::remote_player() const {
 }
 
 void PlayerManager::spawn_remote_player() {
-    spdlog::info("Spawning remote player (via companion hijack)...");
+    spdlog::info("Selecting remote companion candidate...");
 
     auto& hijack = CompanionHijack::instance();
     if (!hijack.is_active()) {
@@ -215,7 +241,7 @@ void PlayerManager::spawn_remote_player() {
         }
     }
 
-    spdlog::info("Remote player spawned successfully");
+    spdlog::warn("Remote companion candidate selected; pose application is disabled");
 }
 
 void PlayerManager::despawn_remote_player() {
@@ -294,7 +320,9 @@ void PlayerManager::invalidate_local_player() {
     rt.player_actor_ptr = 0;
     rt.player_component_table = 0;
     rt.player_transform_component = 0;
+    rt.player_position_ptr = 0;
     rt.player_stats_component = 0;
+    rt.actor_manager_ptr = 0;
     rt.player_resolved = false;
     rt.position_resolved = false;
 }

@@ -7,9 +7,8 @@
 
 namespace cdcoop {
 
-// Manages animation state replication for the remote player entity.
-// Uses the game's existing animation system by writing to the companion entity's
-// animation controller that we hijacked for player 2.
+// Tracks animation remapping research for the remote player entity. Application
+// is disabled until the current build's evaluator ownership is mapped safely.
 class AnimationSync {
 public:
     static AnimationSync& instance();
@@ -17,7 +16,7 @@ public:
     void initialize();
     void shutdown();
 
-    // Apply a received animation state to the remote player entity
+    // Currently a no-op: current-build direct animation writes are unsafe.
     void apply_remote_animation(uintptr_t entity_ptr, uint32_t anim_id,
                                 float blend_weight, float speed, float normalized_time);
 

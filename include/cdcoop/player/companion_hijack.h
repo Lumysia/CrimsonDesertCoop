@@ -5,9 +5,9 @@
 
 namespace cdcoop {
 
-// Hijacks a companion slot to create a player-controlled entity for player 2.
-// Instead of AI-controlling the companion, we override its position, rotation,
-// and animation state with data received from the remote player.
+// Locates and tracks a companion candidate for a future player-2 takeover.
+// Current-build state writes are disabled until the engine's AI/update path can
+// be intercepted without racing or invalidating component ownership.
 //
 // This approach is chosen because:
 // 1. The game already handles companion rendering, collision, and camera
@@ -21,19 +21,18 @@ public:
     bool initialize();
     void shutdown();
 
-    // Activate: take over a companion slot for player 2
-    // Returns true if a companion was successfully hijacked
+    // Select and track a companion candidate without mutating it.
     bool activate();
 
     // Deactivate: stop applying remote state to the companion
     void deactivate();
     void invalidate();
 
-    // Get the hijacked companion's entity pointer (used by sync systems)
-    uintptr_t get_entity_ptr() const { return hijacked_entity_; }
+    // Get the selected companion's entity pointer (used by sync systems)
+    uintptr_t get_entity_ptr() const;
     bool is_active() const;
 
-    // Override companion state with remote player data
+    // Disabled current-build state application entry points.
     void set_position(const Vec3& pos, const Quat& rot);
     void set_animation(uint32_t anim_id, float blend, float speed, float time);
     void set_health(float health, float max_health);
@@ -41,8 +40,11 @@ public:
 private:
     CompanionHijack() = default;
 
-    uintptr_t hijacked_entity_ = 0;    // The companion entity we took over
-    int hijacked_slot_ = -1;           // Which companion slot we're using
+    uintptr_t actor_registry_ = 0;
+    uintptr_t hijacked_entity_ = 0;    // ClientChildOnlyInGameActor
+    uintptr_t hijacked_transform_ = 0; // ClientTransformSyncActorComponent
+    uintptr_t hijacked_stats_ = 0;     // Health StatEntry
+    int hijacked_slot_ = -1;           // Index in ActorManager registry
     bool active_ = false;
 };
 

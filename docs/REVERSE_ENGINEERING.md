@@ -11,7 +11,7 @@ This document explains how to find the memory offsets and function signatures ne
 | Health | **Verified** | Player data +0x58 -> StatEntry, int64 value*1000; live read matched 300/300 HP |
 | Stamina / Spirit | **Needs refresh** | May 2026 offsets remain as legacy candidates, but their expected type IDs did not match build 25050808 |
 | Rotation (read) | **Verified** | Quaternion at `ClientTransformSyncActorComponent+0x62C`; live norm and facing changes verified |
-| Companion / body slots | **Broken on current build** | Legacy player-data +0xD0..+0x108 layout is no longer a companion array; current discovery needs a visible companion trace |
+| Companion discovery | **Verified; writes disabled** | ActorManager persistent registry at +0x128 (capacity +0x134) and the Mercenary filter were confirmed live. Direct pose writes race AI; clearing the AI slot caused a delayed crash |
 | Damage tracking | **Disabled / needs refresh** | Legacy AOB retained, but the unsafe inline hook is disabled and current ABI is unverified |
 | Enemy HP / state | **Disabled / needs refresh** | Current ActorManager enumeration and entity mapping are unresolved |
 | Inventory / items | **Legacy research** | Not used by the current co-op path and not revalidated on build 25050808 |
@@ -104,11 +104,33 @@ Animation (ESTIMATED - likely incorrect approach):
 
 Companions (Oongka, Yann, Naira) are key to the co-op approach - we hijack one for Player 2.
 
-The legacy companion path is not valid on Steam build 25050808. The old
-player-data `+0xD0..+0x108` range no longer contains a companion pointer array.
-Locating the current companion entity requires a live trace while a companion
-is visible. Do not write the legacy AI-controller or position offsets on this
-build.
+The legacy player-data `+0xD0..+0x108` body-slot path is not valid on Steam
+build 25050808. The current active actor vector is:
+
+```
+WorldSystem +0x30 -> ClientActorManager
+  +0x128 ptr     Persistent actor pointer registry
+  +0x134 uint32  Registry capacity (4000 observed)
+```
+
+Companions are `ClientChildOnlyInGameActor` entries whose component table
+(`actor+0x68`) contains a `ClientMercenaryActorComponent` at `+0x118`. Their
+Status and TransformSync components use the same paths as the current player.
+The implementation scans the bounded, potentially sparse registry, selects the
+nearest valid mercenary, and validates the registry entry and all cached
+component links before every write. ActorManager `+0x08` contains a
+`ClientActorContainer`, but its `+0x50/+0x54/+0x58` vector was observed as a
+transient queue: its count returned to zero while the actors remained loaded.
+It must not be used as the persistent actor list.
+
+The companion AI component is stored at component-table `+0x58`. A direct
+TransformSync write with that pointer intact was reverted by AI within 100 ms;
+even continuous 60 Hz writes only held the target in 60% of samples. Temporarily
+clearing the AI slot made a single pose write remain stable for a one-second
+test, but the game subsequently crashed. Nulling the component is unsafe and
+must not be used. `CompanionHijack` keeps pose and health writes disabled until
+a safe AI/update hook is identified; health writes could also persist a peer's
+max HP into the local save.
 
 Character slot offsets (from bbfox0703 CT, v1.01.03):
 | Character | Slot Offset |
@@ -262,7 +284,7 @@ component table -> +0x1A0 -> ClientTransformSyncActorComponent
 ```
 - Position is float32 XYZ and changed consistently with controlled player movement.
 - The quaternion at +0x62C remained normalized and changed with facing direction.
-- This is currently a verified read path only; remote companion writes are not enabled for it.
+- Remote companion pose writes are disabled. Direct writes race AI, and clearing the AI component to prevent that race caused a delayed game crash.
 - The legacy `actor -> +0x40 -> +0x08 -> +0x248 -> +0x90` path does not resolve on build 25050808.
 - Position write instruction at `CrimsonDesert.exe+36ADB8C`: `41 0F 11 45 00` (movups [r13+00], xmm0)
 
@@ -425,6 +447,6 @@ Offsets WILL change with game patches. Maintain a version table:
 | 1.00.03     | Verified    | Verified  | Verified        | March 25 patch |
 | 1.01.03     | Verified    | Verified  | Verified        | March hotfix, legacy stat spacing |
 | May 2026 public tables | Unchanged in public sources | Verified via bbfox CT v29 | Unchanged in public sources | Stamina/spirit entry deltas moved to +0x510 / +0x5A0 from health entry |
-| Steam build 25050808 | Verified read at TransformSync +0x63C | Health verified; stamina/spirit need refresh | Verified | Live-tested locally. Player component chain refreshed; companion discovery remains unresolved. |
+| Steam build 25050808 | Read verified at TransformSync +0x63C; remote write disabled | Health read verified; companion health writes disabled; stamina/spirit need refresh | Verified | Live-tested locally. Player and companion discovery chains are verified. Direct pose writes race AI; clearing the AI component caused a delayed crash. |
 
 Use the signature scanner to automatically find updated offsets after patches rather than hardcoding addresses.

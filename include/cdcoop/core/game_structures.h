@@ -273,6 +273,8 @@ namespace offsets {
         constexpr uint32_t COMPONENT_TABLE          = 0x68;
         constexpr uint32_t STATUS_COMPONENT         = 0x20;
         constexpr uint32_t STATUS_PLAYER_DATA       = 0x18;
+        constexpr uint32_t AI_COMPONENT             = 0x58;
+        constexpr uint32_t MERCENARY_COMPONENT      = 0x118;
         constexpr uint32_t TRANSFORM_COMPONENT      = 0x1A0;
         constexpr uint32_t TRANSFORM_ROTATION_QUAT  = 0x62C;
         constexpr uint32_t TRANSFORM_POSITION       = 0x63C;
@@ -626,6 +628,12 @@ namespace offsets {
         constexpr uint32_t CHILD_ACTOR    = 0x50;   // ptr - ClientChildOnlyInGameActor
         constexpr uint32_t USER_ACTOR     = 0x58;   // ptr - ClientUserActor wrapper
         constexpr uint32_t WORLD_SUB_50   = 0x50;   // ptr - sub-object used in WS_P1 sig chain
+
+        // Current-build ActorManager persistent actor registry. Entries can be
+        // sparse, so scan the bounded capacity and validate every actor.
+        constexpr uint32_t ACTOR_REGISTRY_ARRAY    = 0x128; // ptr - actor pointers
+        constexpr uint32_t ACTOR_REGISTRY_CAPACITY = 0x134; // uint32_t (4000 observed)
+        constexpr uint32_t MAX_ACTORS              = 4096;  // patch-drift sanity limit
 
         // For stat access: the stats component is at actor + 0x58, containing
         // an array of entries each 0x10 in size (shifted left 4 = * 16).
