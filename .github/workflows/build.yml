@@ -8,10 +8,24 @@ jobs:
   windows:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Configure
         run: cmake -S . -B build -A x64 -DCDCOOP_USE_STEAM=OFF -DCDCOOP_BUILD_TESTS=ON
       - name: Build
-        run: cmake --build build --config Release
+        shell: pwsh
+        run: |
+          $output = & cmake --build build --config Release 2>&1
+          $exitCode = $LASTEXITCODE
+          $output | ForEach-Object { "$_" }
+          if ($exitCode -ne 0) {
+            $errors = @($output | Where-Object {
+              "$_" -match '(?i)(fatal error|error [A-Z]+[0-9]+|error:|FAILED:)'
+            })
+            foreach ($line in $errors) {
+              $message = "$line" -replace '%', '%25' -replace "`r", '%0D' -replace "`n", '%0A'
+              "::error::$message"
+            }
+            exit $exitCode
+          }
       - name: Test
         run: ctest --test-dir build -C Release --output-on-failure
