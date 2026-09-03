@@ -71,6 +71,13 @@ void PlayerManager::update(float delta_time) {
 Vec3 PlayerManager::local_position() const {
     if (local_player_ == 0) return {0, 0, 0};
 
+    auto& rt = get_runtime_offsets();
+    if (is_readable(rt.player_transform_component + offsets::Player::TRANSFORM_POSITION,
+                    sizeof(Vec3))) {
+        return read_mem<Vec3>(rt.player_transform_component,
+                              offsets::Player::TRANSFORM_POSITION);
+    }
+
     // Verified authoritative position chain (from position_research.md):
     //   actor -> +0x40 -> +0x08 -> player_core (-> +0x248 -> pos_struct -> +0x90)
     // Try the verified chain first, fall back to direct position hook pointer.
@@ -97,6 +104,13 @@ Vec3 PlayerManager::local_position() const {
 
 Quat PlayerManager::local_rotation() const {
     if (local_player_ == 0) return {0, 0, 0, 1};
+    auto& rt = get_runtime_offsets();
+    if (is_readable(rt.player_transform_component +
+                        offsets::Player::TRANSFORM_ROTATION_QUAT,
+                    sizeof(Quat))) {
+        return read_mem<Quat>(rt.player_transform_component,
+                              offsets::Player::TRANSFORM_ROTATION_QUAT);
+    }
     // Rotation follows the position float4 (x,y,z,w) at +0x90.
     // The next float4 at +0xA0 is likely rotation (needs verification).
     uintptr_t player_core = resolve_ptr_chain(local_player_, {
@@ -138,27 +152,22 @@ bool PlayerManager::read_local_state(Vec3& position, Quat& rotation,
                                      float& health, float& max_health) {
     if (!is_valid_ptr(local_player_)) return false;
 
-    uintptr_t core = resolve_ptr_chain(local_player_, {
-        offsets::Player::ACTOR_TO_INNER,
-        offsets::Player::INNER_TO_CORE
-    });
-    uintptr_t pos_struct = resolve_ptr_chain(core, {
-        offsets::Player::POS_OWNER_TO_STRUCT
-    });
+    auto& rt = get_runtime_offsets();
     uintptr_t stat_base = resolve_ptr_chain(local_player_, {
         offsets::Player::STAT_COMPONENT
     });
-    if (!is_valid_ptr(pos_struct) || !is_valid_ptr(stat_base)) {
+    if (!is_readable(rt.player_transform_component +
+                         offsets::Player::TRANSFORM_ROTATION_QUAT,
+                     sizeof(Quat) + sizeof(Vec3)) ||
+        !is_valid_ptr(stat_base)) {
         invalidate_local_player();
         return false;
     }
 
-    position = {
-        read_mem<float>(pos_struct, offsets::Player::POS_STRUCT_X),
-        read_mem<float>(pos_struct, offsets::Player::POS_STRUCT_Y),
-        read_mem<float>(pos_struct, offsets::Player::POS_STRUCT_Z)
-    };
-    rotation = read_mem<Quat>(pos_struct, offsets::Player::ROTATION_QUAT);
+    rotation = read_mem<Quat>(rt.player_transform_component,
+                              offsets::Player::TRANSFORM_ROTATION_QUAT);
+    position = read_mem<Vec3>(rt.player_transform_component,
+                              offsets::Player::TRANSFORM_POSITION);
     int64_t raw_health = read_mem<int64_t>(stat_base, StatEntry::CURRENT_VALUE);
     int64_t raw_max_health = read_mem<int64_t>(stat_base, StatEntry::MAX_VALUE);
 
@@ -283,6 +292,8 @@ void PlayerManager::invalidate_local_player() {
 
     auto& rt = get_runtime_offsets();
     rt.player_actor_ptr = 0;
+    rt.player_component_table = 0;
+    rt.player_transform_component = 0;
     rt.player_stats_component = 0;
     rt.player_resolved = false;
     rt.position_resolved = false;

@@ -265,6 +265,18 @@ namespace offsets {
     }
 
     namespace Player {
+        // Current build component path:
+        // ActorManager+0x50 -> ClientChildOnlyInGameActor
+        //   -> +0x68 component table
+        //   -> +0x20 ClientStatusActorComponent -> +0x18 player data
+        //   -> +0x1A0 ClientTransformSyncActorComponent
+        constexpr uint32_t COMPONENT_TABLE          = 0x68;
+        constexpr uint32_t STATUS_COMPONENT         = 0x20;
+        constexpr uint32_t STATUS_PLAYER_DATA       = 0x18;
+        constexpr uint32_t TRANSFORM_COMPONENT      = 0x1A0;
+        constexpr uint32_t TRANSFORM_ROTATION_QUAT  = 0x62C;
+        constexpr uint32_t TRANSFORM_POSITION       = 0x63C;
+
         // These are resolved at runtime from the player actor.
         // The stat entry is found by scanning the stat component (base+0x58 array).
         constexpr uint32_t STAT_COMPONENT = 0x58;  // Array of stat entries (from StatsAccess sig)
@@ -611,7 +623,8 @@ namespace offsets {
         // WorldSystem is a singleton found via RIP-relative pointer in WS_P1/P2/P3 sigs.
         constexpr uint32_t WORLD_SYSTEM   = 0x00;   // ptr - WorldSystem singleton (from sig scan)
         constexpr uint32_t ACTOR_MANAGER  = 0x30;   // ptr - ActorManager within WorldSystem
-        constexpr uint32_t USER_ACTOR     = 0x28;   // ptr - user/player actor within ActorManager
+        constexpr uint32_t CHILD_ACTOR    = 0x50;   // ptr - ClientChildOnlyInGameActor
+        constexpr uint32_t USER_ACTOR     = 0x58;   // ptr - ClientUserActor wrapper
         constexpr uint32_t WORLD_SUB_50   = 0x50;   // ptr - sub-object used in WS_P1 sig chain
 
         // For stat access: the stats component is at actor + 0x58, containing
@@ -1049,6 +1062,8 @@ namespace signatures {
 struct RuntimeOffsets {
     uintptr_t world_system_ptr = 0;       // WorldSystem singleton address
     uintptr_t player_actor_ptr = 0;       // Current player actor base
+    uintptr_t player_component_table = 0; // Current player's component pointer table
+    uintptr_t player_transform_component = 0; // ClientTransformSyncActorComponent
     uintptr_t player_position_ptr = 0;    // Float* to player [X,Y,Z]
     uintptr_t player_stats_component = 0; // Stats component base
     uintptr_t actor_manager_ptr = 0;      // ActorManager for entity iteration

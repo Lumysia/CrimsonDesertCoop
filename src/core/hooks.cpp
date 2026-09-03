@@ -451,7 +451,9 @@ bool HookManager::resolve_player_actor() {
     auto& rt = get_runtime_offsets();
     if (!rt.world_system_resolved) return false;
 
-    // Follow the chain: WorldSystem -> ActorManager -> UserActor
+    // Follow the current client actor/component chain. ClientUserActor is a
+    // wrapper in this build; the status component owns the player data used by
+    // stat reads, while TransformSync owns the live pose.
     uintptr_t actor_mgr = resolve_ptr_chain(rt.world_system_ptr, {
         offsets::World::ACTOR_MANAGER
     });
@@ -463,18 +465,32 @@ bool HookManager::resolve_player_actor() {
 
     rt.actor_manager_ptr = actor_mgr;
 
-    uintptr_t player = resolve_ptr_chain(actor_mgr, {
-        offsets::World::USER_ACTOR
+    uintptr_t child_actor = resolve_ptr_chain(actor_mgr, {
+        offsets::World::CHILD_ACTOR
+    });
+    uintptr_t component_table = resolve_ptr_chain(child_actor, {
+        offsets::Player::COMPONENT_TABLE
+    });
+    uintptr_t status_component = resolve_ptr_chain(component_table, {
+        offsets::Player::STATUS_COMPONENT
+    });
+    uintptr_t player = resolve_ptr_chain(status_component, {
+        offsets::Player::STATUS_PLAYER_DATA
+    });
+    uintptr_t transform = resolve_ptr_chain(component_table, {
+        offsets::Player::TRANSFORM_COMPONENT
     });
 
-    if (!is_valid_ptr(player)) {
-        spdlog::warn("Player actor not found (actor_mgr=0x{:X})", actor_mgr);
+    if (!is_valid_ptr(player) || !is_valid_ptr(transform)) {
+        spdlog::warn("Player components not found (actor_mgr=0x{:X})", actor_mgr);
         return false;
     }
 
     rt.player_actor_ptr = player;
+    rt.player_component_table = component_table;
+    rt.player_transform_component = transform;
     rt.player_resolved = true;
-    spdlog::info("Player actor resolved at 0x{:X}", player);
+    spdlog::info("Player resolved at 0x{:X}, transform at 0x{:X}", player, transform);
 
     // Resolve the stats component (pointer at actor + 0x58)
     uintptr_t stat_base = resolve_ptr_chain(player, {offsets::Player::STAT_COMPONENT});
