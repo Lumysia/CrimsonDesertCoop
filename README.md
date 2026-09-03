@@ -2,11 +2,11 @@
 
 A co-op multiplayer mod for [Crimson Desert](https://store.steampowered.com/app/3321460/Crimson_Desert/) that allows two players to play through the game together. The host player's game world is shared with a second player who joins via Steam P2P networking.
 
-> **Status: 0.3.0 Pre-Alpha - Safe Player-Sync Baseline**
+> **Status: 0.3.1 Pre-Alpha - Safe Player-Sync Baseline**
 >
 > Steam connection polling, handshake retry, symmetric companion hijacking, position interpolation, and health state handling form the current testable MVP on a supported game build. The July 2026 game update invalidated the published core signatures; until fresh offsets are verified, the mod detects that build and refuses to start a co-op session instead of risking a save-load crash. Enemy/combat sync and direct animation writes are disabled because their previous hook ABI/entity mapping was unsafe. DX12 overlay rendering is experimental and off by default; the Present hook remains tick-only.
 
-## What's New in 0.3.0
+## What's New in 0.3.1
 
 - Fixed the Steam session deadlock: transports are polled while hosting and connecting, and clients send/retry the handshake only after the asynchronous P2P connection is ready.
 - Both peers now hijack a local companion for the remote player, with retry when the companion appears after loading.

@@ -420,6 +420,6 @@ Offsets WILL change with game patches. Maintain a version table:
 | 1.00.03     | Verified    | Verified  | Verified        | March 25 patch |
 | 1.01.03     | Verified    | Verified  | Verified        | March hotfix, legacy stat spacing |
 | May 2026 public tables | Unchanged in public sources | Verified via bbfox CT v29 | Unchanged in public sources | Stamina/spirit entry deltas moved to +0x510 / +0x5A0 from health entry |
-| July 4 2026 patch | Broken | Broken | Broken | Published core signatures no longer match. Version 0.3.0 fails closed until a new scan is verified. |
+| July 4 2026 patch | Broken | Broken | Broken | Published core signatures no longer match. Version 0.3.1 fails closed until a new scan is verified. |
 
 Use the signature scanner to automatically find updated offsets after patches rather than hardcoding addresses.
