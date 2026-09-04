@@ -2,10 +2,14 @@
 #include <cdcoop/core/config.h>
 #include <cdcoop/core/hooks.h>
 #include <cdcoop/core/game_structures.h>
+#include <cdcoop/core/memory.h>
 #include <cdcoop/player/companion_hijack.h>
 #include <cdcoop/network/session.h>
 #include <spdlog/spdlog.h>
 #include <cmath>
+#include <filesystem>
+#include <fstream>
+#include <stdexcept>
 
 namespace cdcoop {
 
@@ -15,6 +19,9 @@ PlayerManager& PlayerManager::instance() {
 }
 
 bool PlayerManager::initialize() {
+    if (get_config().enable_companion_position_control) {
+        initialize_position_control();
+    }
     find_local_player();
 
     if (local_player_ == 0) {
@@ -89,7 +96,7 @@ void PlayerManager::update(float delta_time) {
     const bool should_select_companion = Session::instance().is_active() ||
                                          cfg.diagnose_companion_position_write ||
                                          cfg.enable_companion_position_override ||
-                                         cfg.test_companion_position_write;
+                                         cfg.enable_companion_position_control;
     if (should_select_companion && !is_remote_spawned()) {
         remote_spawn_retry_timer_ += delta_time;
         if (remote_spawn_retry_timer_ >= 1.0f) {
@@ -100,9 +107,13 @@ void PlayerManager::update(float delta_time) {
         remote_spawn_retry_timer_ = 0.0f;
     }
 
+    if (cfg.enable_companion_position_control) {
+        poll_position_control(delta_time);
+    }
+
     if (cfg.diagnose_companion_position_write ||
         cfg.enable_companion_position_override ||
-        cfg.test_companion_position_write) {
+        cfg.enable_companion_position_control) {
         companion_probe_log_timer_ += delta_time;
         if (companion_probe_log_timer_ >= 1.0f) {
             companion_probe_log_timer_ = 0.0f;
@@ -110,6 +121,155 @@ void PlayerManager::update(float delta_time) {
         }
     } else {
         companion_probe_log_timer_ = 0.0f;
+    }
+}
+
+void PlayerManager::initialize_position_control() {
+    const std::string module_dir = self_module_dir();
+    if (module_dir.empty()) {
+        spdlog::error("External position control disabled: ASI directory is unavailable");
+        position_control_disabled_ = true;
+        return;
+    }
+
+    position_control_path_ = module_dir + "cdcoop_position_control.json";
+    std::ifstream file(position_control_path_);
+    if (!file.is_open()) {
+        std::error_code error;
+        const bool exists = std::filesystem::exists(position_control_path_, error);
+        if (!exists && !error) {
+            position_control_ready_ = true;
+            position_control_parse_error_logged_ = false;
+            spdlog::info("External position control armed at {} (no baseline command)",
+                         position_control_path_);
+        } else if (!position_control_parse_error_logged_) {
+            spdlog::warn("External position control is disarmed until {} can be read",
+                         position_control_path_);
+            position_control_parse_error_logged_ = true;
+        }
+        return;
+    }
+
+    try {
+        const nlohmann::json command = nlohmann::json::parse(file);
+        if (!command.contains("command_id") ||
+            !command["command_id"].is_number_unsigned() ||
+            command["command_id"].get<uint64_t>() == 0) {
+            throw std::runtime_error("baseline command_id must be a positive integer");
+        }
+        last_position_command_id_ = command["command_id"].get<uint64_t>();
+        position_control_ready_ = true;
+        position_control_parse_error_logged_ = false;
+        spdlog::info("External position control armed at {} (baseline command_id={})",
+                     position_control_path_, last_position_command_id_);
+    } catch (const std::exception& e) {
+        if (!position_control_parse_error_logged_) {
+            spdlog::warn("Position control baseline ignored: {}", e.what());
+            position_control_parse_error_logged_ = true;
+        }
+    }
+}
+
+void PlayerManager::poll_position_control(float delta_time) {
+    position_control_poll_timer_ += delta_time;
+    if (position_control_poll_timer_ < 0.1f) return;
+    position_control_poll_timer_ = 0.0f;
+
+    if (position_control_disabled_) return;
+    if (!position_control_ready_) {
+        initialize_position_control();
+        return;
+    }
+    std::ifstream file(position_control_path_);
+    if (!file.is_open()) return;
+
+    nlohmann::json command;
+    try {
+        command = nlohmann::json::parse(file);
+    } catch (const std::exception& e) {
+        if (!position_control_parse_error_logged_) {
+            spdlog::warn("Position control command is not valid JSON: {}", e.what());
+            position_control_parse_error_logged_ = true;
+        }
+        return;
+    }
+    if (!command.contains("command_id") ||
+        !command["command_id"].is_number_unsigned() ||
+        command["command_id"].get<uint64_t>() == 0) {
+        if (!position_control_parse_error_logged_) {
+            spdlog::warn("Position control command requires a positive command_id");
+            position_control_parse_error_logged_ = true;
+        }
+        return;
+    }
+    position_control_parse_error_logged_ = false;
+
+    const uint64_t command_id = command["command_id"].get<uint64_t>();
+    if (command_id <= last_position_command_id_) return;
+    if (!command.contains("action") || !command["action"].is_string()) {
+        last_position_command_id_ = command_id;
+        spdlog::warn("Position control command {} rejected: action must be a string",
+                     command_id);
+        return;
+    }
+    const std::string action = command["action"].get<std::string>();
+    auto& hijack = CompanionHijack::instance();
+
+    if (action == "cancel") {
+        hijack.cancel_position_test();
+        last_position_command_id_ = command_id;
+        spdlog::info("Position control command {} cancelled the active test", command_id);
+        return;
+    }
+
+    if (action != "trigger") {
+        last_position_command_id_ = command_id;
+        spdlog::warn("Position control command {} has unknown action '{}'",
+                     command_id, action);
+        return;
+    }
+
+    try {
+        const auto& offset = command.at("offset");
+        if (!offset.is_object()) throw std::runtime_error("offset must be an object");
+        const double x = offset.at("x").get<double>();
+        const double y = offset.at("y").get<double>();
+        const double z = offset.at("z").get<double>();
+        if (!command.at("duration_ms").is_number_unsigned()) {
+            throw std::runtime_error("duration_ms must be a positive integer");
+        }
+        const uint64_t duration = command.at("duration_ms").get<uint64_t>();
+        constexpr double kMaxOffset = 100.0;
+        constexpr uint64_t kMaxDurationMs = 60'000;
+        if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z) ||
+            std::abs(x) > kMaxOffset || std::abs(y) > kMaxOffset ||
+            std::abs(z) > kMaxOffset || duration == 0 ||
+            duration > kMaxDurationMs) {
+            throw std::runtime_error(
+                "offset must be finite and within +/-100m; duration_ms must be 1..60000");
+        }
+
+        if (!hijack.is_active()) {
+            last_position_command_id_ = command_id;
+            spdlog::warn("Position control command {} rejected: no active companion",
+                         command_id);
+            return;
+        }
+        if (!hijack.request_position_test(
+                {static_cast<float>(x), static_cast<float>(y), static_cast<float>(z)},
+                static_cast<uint32_t>(duration))) {
+            last_position_command_id_ = command_id;
+            spdlog::warn("Position control command {} rejected: hook or target is not ready",
+                         command_id);
+            return;
+        }
+        last_position_command_id_ = command_id;
+        spdlog::info("Position control command {} accepted: offset=({:.3f}, {:.3f}, "
+                     "{:.3f}) duration_ms={}",
+                     command_id, x, y, z, duration);
+    } catch (const std::exception& e) {
+        last_position_command_id_ = command_id;
+        spdlog::warn("Position control command {} rejected: {}", command_id, e.what());
     }
 }
 
@@ -263,6 +423,8 @@ void PlayerManager::spawn_remote_player() {
     if (get_config().enable_companion_position_override) {
         spdlog::warn("Remote companion candidate selected; position override is opt-in, "
                      "rotation remains disabled");
+    } else if (get_config().enable_companion_position_control) {
+        spdlog::info("Remote companion candidate selected; external position control is ready");
     } else {
         spdlog::warn("Remote companion candidate selected; pose application is disabled");
     }

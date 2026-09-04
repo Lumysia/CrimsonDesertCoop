@@ -4,7 +4,7 @@ A co-op multiplayer mod for [Crimson Desert](https://store.steampowered.com/app/
 
 > **Status: 0.3.1 Pre-Alpha - Safe Player-Sync Baseline**
 >
-> Steam connection polling, handshake retry, position interpolation, and health state handling form the current testable baseline. Steam build `25050808` has verified WorldSystem, local-player, TransformSync position/rotation, health reads, active companion enumeration, and correlation of a companion physics-position store. Remote position application remains opt-in while its controlled write test and two-PC behavior are validated; rotation, health, animation, enemy, and combat writes remain disabled. The end-to-end two-player path is not ready for release. DX12 overlay rendering is experimental and off by default; the Present hook remains tick-only.
+> Steam connection polling, handshake retry, position interpolation, and health state handling form the current testable baseline. Steam build `25050808` has verified WorldSystem, local-player, TransformSync position/rotation, health reads, active companion enumeration, and correlation of a companion physics-position store. A bounded three-second write completed under hook telemetry, but its visual result and two-PC behavior remain unverified, so remote position application stays opt-in. Rotation, health, animation, enemy, and combat writes remain disabled. The end-to-end two-player path is not ready for release. DX12 overlay rendering is experimental and off by default; the Present hook remains tick-only.
 
 ## What's New in 0.3.1
 
@@ -85,7 +85,7 @@ These features are **still not fully functional in-game** and need further resea
 | Feature | Status | What's Blocking It |
 |---------|--------|--------------------|
 | Player position / health | Local reads verified on Steam build `25050808`; network path implemented | Two-peer field testing and world-origin rebasing still need verification |
-| Companion / remote player | Discovery and physics mapping verified; position write test pending | ActorManager's registry locates the nearest companion. The engine-thread physics store is correlated over repeated `(r13,rbx)` matches, but remote position override remains opt-in until controlled and two-PC tests pass. Rotation and save-backed health writes remain disabled |
+| Companion / remote player | Discovery and physics mapping verified; bounded write executed under telemetry | ActorManager's registry locates the nearest companion. The engine-thread physics store is correlated over repeated `(r13,rbx)` matches. One test produced 118 bounded writes over about three seconds with no continued writes or crash, but the visual effect was not observed and two-PC behavior remains unverified. Rotation and save-backed health writes remain disabled |
 | Animation sync (cross-model) | Direct actor writes disabled | Per-model animation IDs still need PAZ extraction and the evaluator must be mapped per remote companion |
 | Enemy / combat sync | Disabled | Previous ActorManager enumeration and pointer-derived IDs were not valid across processes |
 | DX12 overlay | Experimental, off by default | The game's DirectX command queue and cross-queue fence lifecycle are not yet captured safely |
@@ -202,7 +202,7 @@ Edit `cdcoop_config.json` in the game directory. The file is auto-created with d
     "enable_experimental_hooks": false,
     "diagnose_companion_position_write": false,
     "enable_companion_position_override": false,
-    "test_companion_position_write": false,
+    "enable_companion_position_control": false,
     "dump_world_system_probe": false,
 
     "toggle_overlay_key": 119,
@@ -232,10 +232,55 @@ Edit `cdcoop_config.json` in the game directory. The file is auto-created with d
 | `enable_experimental_hooks` | `false` | Install CDAnimCancel animation-evaluator hook and dragon HP probe. Disable if mod becomes unstable after a game patch |
 | `diagnose_companion_position_write` | `false` | Install the companion physics-position probe and log coordinate correlation without changing the saved context |
 | `enable_companion_position_override` | `false` | Apply remote XYZ at the correlated engine-thread position store. Experimental and fail-closed; rotation is not applied |
-| `test_companion_position_write` | `false` | One-shot diagnostic: after 30 consecutive identity/coordinate matches, hold the companion two metres to the side for three seconds |
+| `enable_companion_position_control` | `false` | Install and arm the repeatable external position-control command channel described below; receiving no command never writes position |
 | `dump_world_system_probe` | `false` | Walk WorldSystem sibling pointers once after resolve and log their vtable RVAs to `cdcoop_world_probe.log`. Safe, read-only telemetry |
 | `toggle_overlay_key` | `119` | F8 keycode |
 | `open_session_key` | `118` | F7 keycode |
+
+### External Position Control
+
+Set `enable_companion_position_control` to `true` before launching the game once.
+While the game remains running, atomically replace `cdcoop_position_control.json`
+beside the ASI to trigger or cancel offsets. No restart or companion reselection is
+required. Use a positive `command_id` and increment it for every command; the file
+present at startup is treated as a baseline and is not replayed.
+
+The packaged PowerShell controller handles IDs and atomic replacement:
+
+```powershell
+.\cdcoop_position_control.ps1 trigger -X 2 -Y 0 -Z 0 -DurationMs 3000
+.\cdcoop_position_control.ps1 cancel
+```
+
+```json
+{
+    "command_id": 1,
+    "action": "trigger",
+    "offset": { "x": 2.0, "y": 0.0, "z": 0.0 },
+    "duration_ms": 3000
+}
+```
+
+Offsets must be finite and within +/-100 metres per axis. Durations must be from
+1 to 60000 milliseconds. A newer trigger replaces a pending or active command.
+To stop immediately, publish a higher command ID:
+
+```json
+{
+    "command_id": 2,
+    "action": "cancel"
+}
+```
+
+The mod polls at 10 Hz and logs command acceptance, cancellation, lock state,
+write count, and remaining duration to `cdcoop.log`. Use temporary-file-plus-rename
+replacement so the mod never observes a partially written JSON document. All
+existing target epoch, coordinate-correlation, freshness, and validation-lease
+checks still apply before an engine-thread write is permitted. A trigger received
+without an active companion is rejected and consumed rather than delayed into a
+different companion lifecycle; publish a higher command ID after the companion is
+ready. An accepted trigger also expires if the correlated hook cannot begin it
+within two seconds.
 
 ## Project Structure
 

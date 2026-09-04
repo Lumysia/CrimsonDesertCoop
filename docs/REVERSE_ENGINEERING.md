@@ -166,7 +166,7 @@ See `include/cdcoop/core/game_structures.h` namespace `signatures` for all 40+ p
 
 | Hook | Signature | Purpose |
 |------|-----------|---------|
-| CompanionPositionProbe (opt-in correlated mid-hook) | `POSITION_PRIMARY` / `POSITION_FALLBACK` | Correlates the final `movups [r13],xmm0` physics destination with selected companion TransformSync XYZ over 30 consecutive `(r13,rbx)` matches. Diagnostic mode is read-only; separate flags gate remote writes and the one-shot test |
+| CompanionPositionProbe (opt-in correlated mid-hook) | `POSITION_PRIMARY` / `POSITION_FALLBACK` | Correlates the final `movups [r13],xmm0` physics destination with selected companion TransformSync XYZ over 30 consecutive `(r13,rbx)` matches. Diagnostic mode is read-only; separate flags gate remote writes and external position-control commands |
 | DamageSlot | Disabled | Previous inline detour used a function ABI at a mid-function register site |
 | StatWrite | Disabled | Not required for the player-state polling path; previous inline detour was unsafe |
 | CameraZoomFOV | Disabled | Must be rebuilt as a register-correct mid hook before use |
@@ -289,7 +289,9 @@ component table -> +0x1A0 -> ClientTransformSyncActorComponent
 - The legacy `actor -> +0x40 -> +0x08 -> +0x248 -> +0x90` path does not resolve on build 25050808.
 - The current-build position pattern resolves the final `41 0F 11 45 00` (`movups [r13],xmm0`) at RVA `0x3BB103C`.
 - Live movement correlation sampled 400 pairs over 20 seconds: TransformSync moved 117.94m, the physics vector moved 118.44m, 388 samples moved together, maximum X/Z delta was 0.18m, and Y varied from -0.16m to +0.37m due to collision/grounding.
-- The hook locks only after 30 consecutive coordinate matches for the same `(r13,rbx,target epoch)`, requires a fresh validation lease, and rechecks the target epoch before changing `xmm0`. `enable_companion_position_override` and `test_companion_position_write` are both off by default.
+- The hook locks only after 30 consecutive coordinate matches for the same `(r13,rbx,target epoch)`, requires a fresh validation lease, and rechecks the target epoch before changing `xmm0`. `enable_companion_position_override` and `enable_companion_position_control` are both off by default.
+- External position commands are polled from `cdcoop_position_control.json`. A new command ID can repeatedly trigger a bounded XYZ offset or cancel an active offset without restarting the game or revoking the selected companion. The hook snapshots the engine-provided position only after every normal authorization check passes.
+- A controlled run locked at the 30th coordinate match, performed 118 writes over approximately three seconds, stopped writing at expiry, and remained stable through more than 4,800 subsequent matches. The user was not watching the companion at trigger time, so this validates hook telemetry and bounded execution but not the visible displacement.
 
 **Hook-time direct access** (via PositionHeightAccess sig):
 - r13 = physics-layer float4 position destination

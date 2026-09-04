@@ -46,9 +46,9 @@ struct Config {
     // Apply remote position updates at the correlated engine-thread store.
     // Disabled until explicitly enabled after validating the current game build.
     bool enable_companion_position_override = false;
-    // Hold the correlated companion two metres to the side for a few seconds.
-    // One-shot diagnostic used to validate the write path without a second PC.
-    bool test_companion_position_write = false;
+    // Poll cdcoop_position_control.json for explicit, repeatable test commands.
+    // The hook remains fail-closed until a valid external command is received.
+    bool enable_companion_position_control = false;
     // When true, after WorldSystem resolves, scan its sibling pointers and
     // log their vtable RVAs to cdcoop_world_probe.log to help the community
     // identify the quest / cutscene / world-object managers.
@@ -71,7 +71,7 @@ struct Config {
         debug_overlay, log_packets, log_level,
         enable_experimental_hooks,
         enable_experimental_overlay, diagnose_companion_position_write,
-        enable_companion_position_override, test_companion_position_write,
+        enable_companion_position_override, enable_companion_position_control,
         dump_world_system_probe,
         toggle_overlay_key, open_session_key
     )

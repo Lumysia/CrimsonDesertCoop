@@ -64,6 +64,8 @@ jobs:
           $packageDir = "dist/CrimsonDesertCoop-$version-win64"
           New-Item -ItemType Directory -Path $packageDir -Force | Out-Null
           Copy-Item build/bin/Release/CrimsonDesertCoop.asi $packageDir
+          Copy-Item cdcoop_position_control.example.json $packageDir
+          Copy-Item cdcoop_position_control.ps1 $packageDir
           Copy-Item README.md $packageDir
           $archive = "$packageDir.zip"
           Compress-Archive -Path "$packageDir/*" -DestinationPath $archive

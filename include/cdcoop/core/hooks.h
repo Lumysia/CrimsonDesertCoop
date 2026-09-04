@@ -120,7 +120,7 @@ namespace hooks {
 
 // Companion physics-position store. It first correlates r13 with an atomically
 // published TransformSync position over repeated hits. Register writes are
-// permitted only for an explicit remote override or one-shot test.
+// permitted only for an explicit remote override or external test command.
 inline SafetyHookMid companion_position_probe_hook;
 void companion_position_probe_detour(SafetyHookContext& ctx);
 uint64_t set_companion_position_probe_target(uintptr_t target) noexcept;
@@ -132,6 +132,11 @@ bool update_companion_position_probe_reference(
 void set_companion_position_override(
     uintptr_t expected_target, uint64_t expected_epoch,
     float x, float y, float z) noexcept;
+bool request_companion_position_test(
+    uintptr_t expected_target, uint64_t expected_epoch,
+    float offset_x, float offset_y, float offset_z,
+    uint32_t duration_ms) noexcept;
+void cancel_companion_position_test() noexcept;
 void log_companion_position_probe();
 
 // Player animation state hook

@@ -302,6 +302,18 @@ void CompanionHijack::set_position(const Vec3& pos, const Quat& rot) {
     (void)rot;
 }
 
+bool CompanionHijack::request_position_test(
+    const Vec3& offset, uint32_t duration_ms) {
+    if (!is_active()) return false;
+    return hooks::request_companion_position_test(
+        hijacked_transform_ + offsets::Player::TRANSFORM_POSITION,
+        hijacked_target_epoch_, offset.x, offset.y, offset.z, duration_ms);
+}
+
+void CompanionHijack::cancel_position_test() {
+    hooks::cancel_companion_position_test();
+}
+
 void CompanionHijack::set_animation(uint32_t anim_id, float blend,
                                      float speed, float time) {
     // Actor-base animation offsets are unverified on the current build.

@@ -35,6 +35,8 @@ public:
 
     // Position is opt-in; rotation is currently ignored. Other state writes are disabled.
     void set_position(const Vec3& pos, const Quat& rot);
+    bool request_position_test(const Vec3& offset, uint32_t duration_ms);
+    void cancel_position_test();
     void set_animation(uint32_t anim_id, float blend, float speed, float time);
     void set_health(float health, float max_health);
 

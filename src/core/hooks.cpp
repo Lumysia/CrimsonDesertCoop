@@ -56,14 +56,20 @@ std::atomic<uint32_t> companion_position_override_y{0};
 std::atomic<uint32_t> companion_position_override_z{0};
 std::atomic<uint32_t> companion_position_override_active{0};
 std::atomic<uint64_t> companion_position_override_epoch{0};
-std::atomic<uint32_t> companion_position_test_started{0};
+std::atomic<uint32_t> companion_position_test_pending{0};
+std::atomic<uint64_t> companion_position_test_request_deadline{0};
 std::atomic<uint64_t> companion_position_test_expires_at{0};
 std::atomic<uint64_t> companion_position_test_epoch{0};
 std::atomic<uint32_t> companion_position_test_x{0};
 std::atomic<uint32_t> companion_position_test_y{0};
 std::atomic<uint32_t> companion_position_test_z{0};
+std::atomic<uint32_t> companion_position_test_offset_x{0};
+std::atomic<uint32_t> companion_position_test_offset_y{0};
+std::atomic<uint32_t> companion_position_test_offset_z{0};
+std::atomic<uint32_t> companion_position_test_duration_ms{0};
 std::atomic<uint32_t> companion_position_override_allowed{0};
 std::atomic<uint32_t> companion_position_test_allowed{0};
+std::atomic<uint32_t> companion_position_test_hook_ready{0};
 std::atomic_flag companion_position_state_gate = ATOMIC_FLAG_INIT;
 std::atomic<uint32_t> companion_position_state_writer_pending{0};
 
@@ -153,7 +159,8 @@ void revoke_companion_position_mapping_unlocked() noexcept {
     companion_position_probe_locked_r13.store(0, std::memory_order_relaxed);
     companion_position_probe_locked_rbx.store(0, std::memory_order_relaxed);
     companion_position_probe_validation_lease.store(0, std::memory_order_relaxed);
-    companion_position_test_started.store(0, std::memory_order_relaxed);
+    companion_position_test_pending.store(0, std::memory_order_relaxed);
+    companion_position_test_request_deadline.store(0, std::memory_order_relaxed);
     companion_position_test_expires_at.store(0, std::memory_order_relaxed);
     companion_position_test_epoch.store(0, std::memory_order_relaxed);
 }
@@ -321,10 +328,10 @@ bool HookManager::initialize() {
         cfg.enable_companion_position_override ? 1U : 0U,
         std::memory_order_relaxed);
     companion_position_test_allowed.store(
-        cfg.test_companion_position_write ? 1U : 0U,
+        cfg.enable_companion_position_control ? 1U : 0U,
         std::memory_order_relaxed);
     if (cfg.diagnose_companion_position_write ||
-        cfg.enable_companion_position_override || cfg.test_companion_position_write) {
+        cfg.enable_companion_position_override || cfg.enable_companion_position_control) {
         auto position_sig = sig_scan(signatures::POSITION_PRIMARY,
                                      "CompanionPositionProbe");
         uintptr_t target = position_sig
@@ -352,10 +359,11 @@ bool HookManager::initialize() {
         if (position_sig && bytes_match &&
             create_mid_hook(target, hooks::companion_position_probe_detour,
                             hooks::companion_position_probe_hook)) {
+            companion_position_test_hook_ready.store(1, std::memory_order_release);
             spdlog::info("Installed CompanionPositionProbe at 0x{:X} "
-                         "(remote_override={}, one_shot_test={})",
+                         "(remote_override={}, external_test_control={})",
                          target, cfg.enable_companion_position_override,
-                         cfg.test_companion_position_write);
+                         cfg.enable_companion_position_control);
             status_.installed++;
             status_.installed_names.emplace_back("CompanionPositionProbe (correlated mid)");
         } else {
@@ -452,6 +460,7 @@ bool HookManager::initialize() {
 void HookManager::shutdown() {
     if (!initialized_) return;
 
+    companion_position_test_hook_ready.store(0, std::memory_order_release);
     hooks::set_companion_position_probe_target(0);
     // SafetyHook automatically restores original code when hooks are destroyed
     hooks::companion_position_probe_hook = {};
@@ -867,6 +876,17 @@ void companion_position_probe_detour(SafetyHookContext& ctx) {
         return;
     }
 
+    const uint64_t now = GetTickCount64();
+    if (companion_position_test_pending.load(std::memory_order_acquire) != 0) {
+        const uint64_t request_deadline = companion_position_test_request_deadline.load(
+            std::memory_order_acquire);
+        if (request_deadline == 0 || request_deadline <= now) {
+            companion_position_test_pending.store(0, std::memory_order_release);
+            companion_position_test_request_deadline.store(0, std::memory_order_relaxed);
+            companion_position_test_epoch.store(0, std::memory_order_relaxed);
+        }
+    }
+
     const uint64_t target_epoch = companion_position_probe_target_epoch.load(
         std::memory_order_acquire);
     const uintptr_t target = companion_position_probe_target.load(
@@ -881,7 +901,6 @@ void companion_position_probe_detour(SafetyHookContext& ctx) {
             target_epoch) {
         return;
     }
-    const uint64_t now = GetTickCount64();
     const uint64_t reference_timestamp =
         companion_position_probe_reference_timestamp.load(std::memory_order_acquire);
     constexpr uint64_t kReferenceMaxAgeMs = 500;
@@ -990,31 +1009,6 @@ void companion_position_probe_detour(SafetyHookContext& ctx) {
                 kValidationLease, std::memory_order_relaxed);
             companion_position_probe_locked_epoch.store(
                 target_epoch, std::memory_order_release);
-
-            uint32_t test_expected = 0;
-            if (target_epoch == companion_position_probe_target_epoch.load(
-                                    std::memory_order_acquire) &&
-                companion_position_test_allowed.load(std::memory_order_acquire) != 0 &&
-                companion_position_test_started.compare_exchange_strong(
-                    test_expected, 1, std::memory_order_acq_rel)) {
-                const float test_x = ctx.xmm0.f32[0] + 2.0f;
-                const float test_y = ctx.xmm0.f32[1];
-                const float test_z = ctx.xmm0.f32[2];
-                if (valid_position(test_x, test_y, test_z)) {
-                    companion_position_test_x.store(
-                        std::bit_cast<uint32_t>(test_x), std::memory_order_relaxed);
-                    companion_position_test_y.store(
-                        std::bit_cast<uint32_t>(test_y), std::memory_order_relaxed);
-                    companion_position_test_z.store(
-                        std::bit_cast<uint32_t>(test_z), std::memory_order_relaxed);
-                    companion_position_test_epoch.store(
-                        target_epoch, std::memory_order_relaxed);
-                    companion_position_test_expires_at.store(
-                        now + 3000, std::memory_order_release);
-                } else {
-                    companion_position_test_started.store(0, std::memory_order_relaxed);
-                }
-            }
         }
     } else {
         companion_position_probe_candidate_r13.store(0, std::memory_order_relaxed);
@@ -1051,6 +1045,36 @@ void companion_position_probe_detour(SafetyHookContext& ctx) {
         reference_timestamp <= now && now - reference_timestamp <= kReferenceMaxAgeMs;
     if (!authorized) {
         return;
+    }
+
+    if (companion_position_test_pending.load(std::memory_order_acquire) != 0 &&
+        companion_position_test_allowed.load(std::memory_order_acquire) != 0 &&
+        companion_position_test_epoch.load(std::memory_order_acquire) == target_epoch) {
+        const float offset_x = std::bit_cast<float>(
+            companion_position_test_offset_x.load(std::memory_order_relaxed));
+        const float offset_y = std::bit_cast<float>(
+            companion_position_test_offset_y.load(std::memory_order_relaxed));
+        const float offset_z = std::bit_cast<float>(
+            companion_position_test_offset_z.load(std::memory_order_relaxed));
+        const uint32_t duration_ms = companion_position_test_duration_ms.load(
+            std::memory_order_relaxed);
+        const float test_x = ctx.xmm0.f32[0] + offset_x;
+        const float test_y = ctx.xmm0.f32[1] + offset_y;
+        const float test_z = ctx.xmm0.f32[2] + offset_z;
+        if (duration_ms != 0 && valid_position(test_x, test_y, test_z)) {
+            companion_position_test_x.store(
+                std::bit_cast<uint32_t>(test_x), std::memory_order_relaxed);
+            companion_position_test_y.store(
+                std::bit_cast<uint32_t>(test_y), std::memory_order_relaxed);
+            companion_position_test_z.store(
+                std::bit_cast<uint32_t>(test_z), std::memory_order_relaxed);
+            companion_position_test_expires_at.store(
+                now + duration_ms, std::memory_order_release);
+        } else {
+            companion_position_test_expires_at.store(0, std::memory_order_release);
+        }
+        companion_position_test_pending.store(0, std::memory_order_release);
+        companion_position_test_request_deadline.store(0, std::memory_order_relaxed);
     }
 
     const uint64_t test_expires_at = companion_position_test_expires_at.load(
@@ -1177,6 +1201,60 @@ void set_companion_position_override(
     unlock_companion_position_state();
 }
 
+bool request_companion_position_test(
+    uintptr_t expected_target, uint64_t expected_epoch,
+    float offset_x, float offset_y, float offset_z,
+    uint32_t duration_ms) noexcept {
+    constexpr float kMaxTestOffset = 100.0f;
+    constexpr uint32_t kMaxTestDurationMs = 60'000;
+    if (!std::isfinite(offset_x) || !std::isfinite(offset_y) ||
+        !std::isfinite(offset_z) || std::abs(offset_x) > kMaxTestOffset ||
+        std::abs(offset_y) > kMaxTestOffset ||
+        std::abs(offset_z) > kMaxTestOffset || duration_ms == 0 ||
+        duration_ms > kMaxTestDurationMs) {
+        return false;
+    }
+
+    lock_companion_position_state();
+    const bool accepted =
+        companion_position_test_allowed.load(std::memory_order_acquire) != 0 &&
+        companion_position_test_hook_ready.load(std::memory_order_acquire) != 0 &&
+        expected_target != 0 &&
+        companion_position_probe_target.load(std::memory_order_acquire) ==
+            expected_target &&
+        companion_position_probe_target_epoch.load(std::memory_order_acquire) ==
+            expected_epoch;
+    if (accepted) {
+        constexpr uint64_t kRequestLifetimeMs = 2'000;
+        companion_position_test_pending.store(0, std::memory_order_release);
+        companion_position_test_expires_at.store(0, std::memory_order_release);
+        companion_position_test_offset_x.store(
+            std::bit_cast<uint32_t>(offset_x), std::memory_order_relaxed);
+        companion_position_test_offset_y.store(
+            std::bit_cast<uint32_t>(offset_y), std::memory_order_relaxed);
+        companion_position_test_offset_z.store(
+            std::bit_cast<uint32_t>(offset_z), std::memory_order_relaxed);
+        companion_position_test_duration_ms.store(
+            duration_ms, std::memory_order_relaxed);
+        companion_position_test_epoch.store(
+            expected_epoch, std::memory_order_relaxed);
+        companion_position_test_request_deadline.store(
+            GetTickCount64() + kRequestLifetimeMs, std::memory_order_relaxed);
+        companion_position_test_pending.store(1, std::memory_order_release);
+    }
+    unlock_companion_position_state();
+    return accepted;
+}
+
+void cancel_companion_position_test() noexcept {
+    lock_companion_position_state();
+    companion_position_test_pending.store(0, std::memory_order_release);
+    companion_position_test_request_deadline.store(0, std::memory_order_relaxed);
+    companion_position_test_expires_at.store(0, std::memory_order_release);
+    companion_position_test_epoch.store(0, std::memory_order_relaxed);
+    unlock_companion_position_state();
+}
+
 void log_companion_position_probe() {
     // Cumulative loads avoid splitting one hit/match pair across reset windows.
     // Load matches first: every match increments hits first, so hits >= matches.
@@ -1208,13 +1286,15 @@ void log_companion_position_probe() {
     const uint64_t now = GetTickCount64();
     const uint64_t test_ms_remaining = test_expires_at > now
         ? test_expires_at - now : 0;
+    const bool test_pending =
+        companion_position_test_pending.load(std::memory_order_acquire) != 0;
     spdlog::info("CompanionPositionProbe: hits={} direct_matches={} coordinate_matches={} "
-                 "target=0x{:X} candidate=0x{:X}/0x{:X}/{} locked_r13=0x{:X} "
-                 "locked_rbx=0x{:X} writes={} test_ms_remaining={} last_r13=0x{:X} "
-                 "last_rbx=0x{:X}",
-                 hits, matches, coordinate_matches, target, candidate_r13, candidate_rbx,
-                 candidate_streak, locked_r13, locked_rbx, override_writes,
-                 test_ms_remaining, last_r13, last_rbx);
+                  "target=0x{:X} candidate=0x{:X}/0x{:X}/{} locked_r13=0x{:X} "
+                  "locked_rbx=0x{:X} writes={} test_pending={} test_ms_remaining={} last_r13=0x{:X} "
+                  "last_rbx=0x{:X}",
+                  hits, matches, coordinate_matches, target, candidate_r13, candidate_rbx,
+                  candidate_streak, locked_r13, locked_rbx, override_writes,
+                  test_pending, test_ms_remaining, last_r13, last_rbx);
 }
 
 void __cdecl player_animation_detour(void* player, uint32_t anim_id, float blend) {
